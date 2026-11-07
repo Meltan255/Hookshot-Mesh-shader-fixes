@@ -1,113 +1,194 @@
-name: RX 580 WebGPU fallback test DLL
+name: RX 580 Hookshot Builder test package
 
 on:
   push:
     branches:
       - research/rx580-compute-mesh-fallback
     paths:
-      - gpu/vk/**
-      - nx2/build.py
-      - scripts/linux/deps.sh
+      - gpu/**
+      - host/**
+      - nx2/**
+      - third_party/**
+      - builder/**
       - .github/workflows/rx580-fallback-test.yml
+      - docs/rx580-fallback-test.md
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: rx580-fallback-test-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  windows-dll:
-    name: Build test Vulkan DLL (Windows x64)
+  windows-builder:
+    name: Build Windows HookshotBuilder.zip
     runs-on: windows-2022
     timeout-minutes: 360
     steps:
       - name: Check out source
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        uses: actions/checkout@v4
 
-      - name: Install LLVM toolchain
-        uses: emscripten-core/setup-emsdk@v16
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
         with:
-          version: latest
+          dotnet-version: 8.0.x
 
-      - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version: '3.12'
-
-      - name: Fetch Vulkan build headers
+      - name: Publish HookshotBuilder.exe
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $root = Join-Path $env:GITHUB_WORKSPACE "build-deps\cpm"
-          $packages = @(
-            @{ Name = "vulkanheaders"; Tag = "v1.4.345"; Repo = "KhronosGroup/Vulkan-Headers" },
-            @{ Name = "spirv-headers"; Tag = "vulkan-sdk-1.4.341.0"; Repo = "KhronosGroup/SPIRV-Headers" },
-            @{ Name = "vulkanmemoryallocator"; Tag = "v3.3.0"; Repo = "GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator" }
-          )
-          foreach ($p in $packages) {
-            $dest = Join-Path $root (Join-Path $p.Name $p.Tag)
-            New-Item -ItemType Directory -Force -Path $dest | Out-Null
-            $archive = Join-Path $env:RUNNER_TEMP ($p.Name + ".tar.gz")
-            $url = "https://github.com/$($p.Repo)/archive/refs/tags/$($p.Tag).tar.gz"
-            Invoke-WebRequest -Uri $url -OutFile $archive
-            tar -xzf $archive -C $dest --strip-components=1
-          }
+          $publish = Join-Path $env:RUNNER_TEMP "builder-publish"
+          dotnet publish builder/HookshotBuilder/HookshotBuilder.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=false -o $publish
+          if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed" }
+          if (-not (Test-Path (Join-Path $publish "HookshotBuilder.exe"))) { throw "HookshotBuilder.exe was not produced" }
 
-      - name: Compile renderer DLL only
+      - name: Download the full Builder tools bundle
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $archive = Join-Path $env:RUNNER_TEMP "HookshotBuilder-upstream.zip"
+          $extract = Join-Path $env:RUNNER_TEMP "HookshotBuilder-upstream"
+          $url = "https://github.com/NotRexed/Hookshot/releases/download/foliage-linux-updater/HookshotBuilder.zip"
+          Invoke-WebRequest -Uri $url -OutFile $archive
+          Expand-Archive -LiteralPath $archive -DestinationPath $extract -Force
+
+          $builderExe = Get-ChildItem -LiteralPath $extract -Filter "HookshotBuilder.exe" -File -Recurse | Select-Object -First 1
+          if (-not $builderExe) { throw "The upstream package does not contain HookshotBuilder.exe" }
+          $packageRoot = $builderExe.Directory.FullName
+          $tools = Join-Path $packageRoot "tools"
+          if (-not (Test-Path (Join-Path $tools "nx2/make_game.py"))) { throw "The downloaded zip does not contain tools/nx2/make_game.py beside Builder.exe" }
+          if (-not (Test-Path (Join-Path $tools "python/python.exe"))) { throw "The full Python runtime is missing from the upstream tools bundle" }
+          if (-not (Test-Path (Join-Path $tools "emsdk/upstream/bin/clang.exe"))) { throw "The bundled LLVM compiler is missing" }
+          if (-not (Test-Path (Join-Path $tools "cpm/vulkanheaders"))) { throw "Vulkan-Headers are missing from tools/cpm" }
+          if (-not (Test-Path (Join-Path $tools "cpm/spirv-headers"))) { throw "SPIRV-Headers are missing from tools/cpm" }
+
+          "PACKAGE_ROOT=$packageRoot" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "TOOLS_ROOT=$tools" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Found Builder package: $packageRoot"
+
+      - name: Overlay this fork's current source into tools
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $names = @("nx2", "host", "gpu", "third_party", "assets")
+          foreach ($name in $names) {
+            $source = Join-Path $env:GITHUB_WORKSPACE $name
+            $dest = Join-Path $env:TOOLS_ROOT $name
+            New-Item -ItemType Directory -Force -Path $dest | Out-Null
+            robocopy $source $dest /E /NFL /NDL /NJH /NJS /NP /R:2 /W:1 | Out-Null
+            if ($LASTEXITCODE -ge 8) { throw "Could not overlay source folder $name (robocopy exit $LASTEXITCODE)" }
+          }
+          Copy-Item LICENSE (Join-Path $env:TOOLS_ROOT "LICENSE") -Force
+          Copy-Item readme.md (Join-Path $env:TOOLS_ROOT "readme.md") -Force
+          Write-Host "Updated source copied; packaged compiler, Python, SDL and WGPU binaries were preserved."
+
+      - name: Compile the changed Vulkan renderer as a build check
         shell: pwsh
         env:
           RX_VK_ONLY: "1"
-          RX_CPM: ${{ github.workspace }}\build-deps\cpm
           RX_JOBS: "3"
         run: |
           $ErrorActionPreference = "Stop"
-          if (-not $env:EMSDK) { throw "EMSDK was not configured by setup-emsdk" }
-          python -I nx2/build.py --standalone --jobs 3
-          $dll = "work/sa/build/hookshot_vk.dll"
-          if (-not (Test-Path $dll)) { throw "Renderer DLL was not produced: $dll" }
+          $env:EMSDK = Join-Path $env:TOOLS_ROOT "emsdk"
+          $env:RX_CPM = Join-Path $env:TOOLS_ROOT "cpm"
+          $env:OOT_WORK = Join-Path $env:RUNNER_TEMP "rx580-renderer-build"
+          $python = Join-Path $env:TOOLS_ROOT "python/python.exe"
+          $script = Join-Path $env:TOOLS_ROOT "nx2/build.py"
+          & $python -I $script --standalone --jobs 3
+          if ($LASTEXITCODE -ne 0) { throw "The Vulkan renderer did not compile" }
+          $dll = Join-Path $env:OOT_WORK "sa/build/hookshot_vk.dll"
+          if (-not (Test-Path $dll)) { throw "Renderer compile completed without producing hookshot_vk.dll" }
+          Write-Host ("Renderer compile passed: {0:N1} MB" -f ((Get-Item $dll).Length / 1MB))
 
-      - name: Package test build
+      - name: Assemble the Builder ZIP
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $stage = Join-Path $env:RUNNER_TEMP "rx580-webgpu-fallback"
-          New-Item -ItemType Directory -Force -Path $stage | Out-Null
-          Copy-Item "work/sa/build/hookshot_vk.dll" $stage
+          $publish = Join-Path $env:RUNNER_TEMP "builder-publish"
+          Copy-Item (Join-Path $publish "*") $env:PACKAGE_ROOT -Recurse -Force
+
+          $version = "rx580-builder-test-$env:GITHUB_RUN_NUMBER"
+          Set-Content -LiteralPath (Join-Path $env:TOOLS_ROOT "version.txt") -Value $version -Encoding ascii
+
           @'
-          RX 580 WebGPU fallback test build
-          =================================
+          RX 580 Hookshot Builder test package
+          ===================================
 
-          This is a TEST renderer DLL, not a complete mesh-shader emulation.
+          This is the Windows Hookshot Builder application package, not a prebuilt game.
+          Extract the whole ZIP, keep the tools folder beside HookshotBuilder.exe, and run
+          HookshotBuilder.exe. It builds from your own supported game files on your PC.
+          No game dump, keys, generated game executable or saves are included.
 
-          Install:
-          1. Close Hookshot.
-          2. Back up the existing hookshot_vk.dll in your game folder.
-          3. Copy this hookshot_vk.dll beside hookshot.exe.
-          4. Open hookshot_env.txt beside hookshot.exe (create it if absent) and add:
-             RX_VK_FALLBACK_NO_MESH=1
-          5. Start Hookshot and test the same scene.
+          RX 580 test:
+          1. Use Builder to build your own game folder.
+          2. In the folder containing the newly built hookshot.exe, create or edit
+             hookshot_env.txt and add these two lines:
+                 RX_VK_FALLBACK_NO_MESH=1
+                 HOOKSHOT_NO_UPDATE_CHECK=1
+          3. Start hookshot.exe and test the menu and the same scene as before.
+          4. Send back hookshot_log.txt and describe what appears or is missing.
 
-          Expected test behavior:
-          - On a GPU without VK_EXT_mesh_shader + meshShader + taskShader, the Vulkan DLL
-            declines startup and Hookshot's existing WebGPU renderer is selected.
-          - WebGPU can render ordinary vertex/fragment/compute work, but it does NOT recreate
-            geometry generated by NVN task/mesh shaders. Some objects/vegetation may remain missing.
-          - This test checks whether the regular rendering path improves the UI/scene and gives
-            us a clean comparison log. It is not the final compute-to-vertex fallback.
+          What this experiment does:
+          On a GPU without Vulkan task/mesh shader support, the Vulkan renderer declines
+          startup and Hookshot falls back to its existing WebGPU renderer.
 
-          To undo:
-          - Restore your backed-up hookshot_vk.dll.
-          - Remove RX_VK_FALLBACK_NO_MESH=1 from hookshot_env.txt.
-          '@ | Set-Content -Encoding UTF8 (Join-Path $stage "README-test.txt")
-          Compress-Archive -Path (Join-Path $stage "*") -DestinationPath (Join-Path $env:RUNNER_TEMP "RX580-WebGPU-fallback-test.zip") -Force
+          Important limitation:
+          This is NOT yet a compute-to-vertex translation of task/mesh shaders. The WebGPU
+          renderer does not recreate that generated geometry, so models, foliage or other
+          objects can still be missing. This package is for testing the Builder and the
+          first renderer hand-off only.
 
-      - name: Upload test build
+          To undo the renderer hand-off, remove RX_VK_FALLBACK_NO_MESH from hookshot_env.txt.
+          Keep HOOKSHOT_NO_UPDATE_CHECK only if you want to suppress the game's upstream
+          update offer while testing this fork.
+          '@ | Set-Content -LiteralPath (Join-Path $env:PACKAGE_ROOT "README-RX580-test.txt") -Encoding UTF8
+
+          $stage = Join-Path $env:RUNNER_TEMP "package-root"
+          $folder = Join-Path $stage "HookshotBuilder"
+          New-Item -ItemType Directory -Force -Path $folder | Out-Null
+          Copy-Item (Join-Path $env:PACKAGE_ROOT "*") $folder -Recurse -Force
+
+          $zip = Join-Path $env:RUNNER_TEMP "HookshotBuilder.zip"
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [System.IO.Compression.ZipFile]::CreateFromDirectory($stage, $zip, [System.IO.Compression.CompressionLevel]::Optimal, $false)
+          if (-not (Test-Path $zip)) { throw "HookshotBuilder.zip was not created" }
+
+          $check = [System.IO.Compression.ZipFile]::OpenRead($zip)
+          try {
+            $required = @("HookshotBuilder/HookshotBuilder.exe", "HookshotBuilder/tools/nx2/make_game.py", "HookshotBuilder/tools/python/python.exe", "HookshotBuilder/tools/version.txt", "HookshotBuilder/README-RX580-test.txt")
+            foreach ($entry in $required) {
+              if (-not ($check.Entries | Where-Object { $_.FullName -eq $entry })) { throw "ZIP is missing $entry" }
+            }
+          } finally {
+            $check.Dispose()
+          }
+          Write-Host ("Packaged {0:N1} MB" -f ((Get-Item $zip).Length / 1MB))
+
+      - name: Upload Builder test artifact
         uses: actions/upload-artifact@v4
         with:
-          name: RX580-WebGPU-fallback-test
-          path: ${{ runner.temp }}\RX580-WebGPU-fallback-test.zip
+          name: RX580-HookshotBuilder-test
+          path: ${{ runner.temp }}\HookshotBuilder.zip
           if-no-files-found: error
           retention-days: 30
+
+      - name: Publish prerelease Builder asset
+        if: github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: rx580-builder-test-${{ github.run_number }}
+          target_commitish: ${{ github.sha }}
+          name: RX 580 Hookshot Builder test ${{ github.run_number }}
+          body: |
+            Experimental Windows Hookshot Builder package for RX 580 testing.
+
+            This release contains the Builder application and its full tools folder. It does not contain a game, game dump, keys, generated game executable or saves.
+
+            The test setting RX_VK_FALLBACK_NO_MESH=1 hands off to the existing WebGPU renderer when Vulkan task/mesh shaders are unavailable. This is not yet a compute-to-vertex mesh-shader translation; missing mesh-generated objects are expected.
+          prerelease: true
+          draft: false
+          make_latest: false
+          files: ${{ runner.temp }}\HookshotBuilder.zip

@@ -1,15 +1,20 @@
-# RX 580 first compatibility test
+# RX 580 Builder test package
 
-This branch now includes an **opt-in WebGPU handoff** for systems without native Vulkan task/mesh shader support.
+The deliverable for this branch is the Windows **Hookshot Builder package**: `HookshotBuilder.exe` plus its sibling `tools/` directory, not a prebuilt game executable.
 
-Set `RX_VK_FALLBACK_NO_MESH=1` in `hookshot_env.txt`. If Vulkan reports that `VK_EXT_mesh_shader`, `meshShader`, or `taskShader` is unavailable, the Vulkan DLL declines to start. The host's existing `rx_backend.c` then selects the WebGPU renderer.
+The Windows workflow downloads the current full Builder tools bundle, overlays this fork's current `nx2/`, `host/`, `gpu/`, `third_party/` and `assets/` source, publishes the WPF Builder app, and checks that the changed Vulkan renderer compiles. The resulting `HookshotBuilder.zip` contains the app, full tools bundle, and test instructions. It does not contain the user's game files, keys, built game, or saves.
 
-This is a deliberately limited first test:
-- It is an actual code path change and can be built as a Windows `hookshot_vk.dll`.
-- It does **not** translate task/mesh shader programs into compute + vertex shaders.
-- The existing WebGPU renderer does not emulate mesh output, so mesh-generated geometry can still be missing.
-- It provides an A/B test of the non-mesh renderer path on the RX 580 and a fresh log before undertaking the full compute emulation.
+## Test steps
 
-The Windows workflow `.github/workflows/rx580-fallback-test.yml` builds only the renderer DLL (no game assets or user game data) and uploads `RX580-WebGPU-fallback-test.zip` as an Actions artifact. Install and rollback instructions are included in the zip.
+1. Extract the complete zip into a folder. Keep `tools/` beside `HookshotBuilder.exe`.
+2. Run `HookshotBuilder.exe` and build from your own supported game copy.
+3. In the folder containing the built `hookshot.exe`, create or edit `hookshot_env.txt` and add:
 
-Do not describe this test as an RX 580 fix unless the tester confirms the scene and interface render acceptably.
+   ```ini
+   RX_VK_FALLBACK_NO_MESH=1
+   HOOKSHOT_NO_UPDATE_CHECK=1
+   ```
+
+4. Start the game and test the same menu and scene. Send back `hookshot_log.txt` and describe which objects/text render.
+
+The renderer experiment is limited: when Vulkan lacks task/mesh shader support, it declines startup and the host selects the existing WebGPU renderer. WebGPU does not emulate the task/mesh-generated geometry, so this is **not** the complete compute-to-vertex fallback and missing models/foliage may remain. The purpose of this first package is to test the Builder distribution and this renderer hand-off on the RX 580.
