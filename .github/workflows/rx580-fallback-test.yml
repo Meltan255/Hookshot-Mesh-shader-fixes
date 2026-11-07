@@ -78,7 +78,9 @@ jobs:
             $dest = Join-Path $env:TOOLS_ROOT $name
             New-Item -ItemType Directory -Force -Path $dest | Out-Null
             robocopy $source $dest /E /NFL /NDL /NJH /NJS /NP /R:2 /W:1 | Out-Null
-            if ($LASTEXITCODE -ge 8) { throw "Could not overlay source folder $name (robocopy exit $LASTEXITCODE)" }
+            $copyExit = $LASTEXITCODE
+            if ($copyExit -ge 8) { throw "Could not overlay source folder $name (robocopy exit $copyExit)" }
+            $global:LASTEXITCODE = 0
           }
           Copy-Item LICENSE (Join-Path $env:TOOLS_ROOT "LICENSE") -Force
           Copy-Item readme.md (Join-Path $env:TOOLS_ROOT "readme.md") -Force
