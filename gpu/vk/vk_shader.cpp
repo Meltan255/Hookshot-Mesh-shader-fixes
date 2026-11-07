@@ -1206,6 +1206,7 @@ int bank_stage(const Code& c) {
 
 std::vector<uint32_t> emit_mesh_compute_vertex_shader(const std::bitset<32>& generics) {
     Sirit::Module module{profile().supported_spirv};
+    module.SetMemoryModel(spv::AddressingModel::Logical, spv::MemoryModel::GLSL450);
     module.AddCapability(spv::Capability::Shader);
     const Sirit::Id f32{module.TypeFloat(32)};
     const Sirit::Id vec4{module.TypeVector(f32, 4)};
