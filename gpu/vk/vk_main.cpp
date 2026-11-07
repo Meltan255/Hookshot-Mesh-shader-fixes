@@ -279,6 +279,14 @@ bool create_device() {
     }
     mesh.multiviewMeshShader = mesh.primitiveFragmentShadingRateMeshShader = VK_FALSE;   // (not used)
     dev.mesh_shader = dev.mesh_shader && mesh.meshShader && mesh.taskShader;
+    // RX 580 compatibility experiment: when asked, decline this renderer if its native task/mesh
+    // stages are unavailable. host/rx_backend.c then starts the existing WebGPU renderer instead.
+    // This is a partial fallback only: WebGPU does not emulate mesh-stage output geometry.
+    const char* fallback_no_mesh = getenv("RX_VK_FALLBACK_NO_MESH");
+    if (!dev.mesh_shader && fallback_no_mesh && std::strcmp(fallback_no_mesh, "0") != 0) {
+        logf("vk: RX_VK_FALLBACK_NO_MESH: no task/mesh shader support; handing off to WebGPU (mesh-generated geometry is not emulated)");
+        return false;
+    }
     if (robust) logf("vk: robust buffer access %s", robust_ok ? "on" : "not supported");
     f.features.robustBufferAccess = robust_ok ? VK_TRUE : VK_FALSE;   // (off by default: the game's accesses stay in their buffers)
     dev.features = f.features;
@@ -468,7 +476,15 @@ const MkwVkRenderer* mkwvk_init(const MkwVkHost* h) {
         logf("vk: vulkan-1.dll not found");
         return nullptr;
     }
-    if (!create_instance() || !pick_device() || !create_device()) return nullptr;
+    if (!create_instance() || !pick_device()) return nullptr;
+    if (!create_device()) {
+        // create_device can decline a GPU before creating a VkDevice (for the optional no-mesh fallback).
+        // Release the instance before the host starts its WebGPU renderer.
+        if (dev.instance && vkx::vkDestroyInstance) vkx::vkDestroyInstance(dev.instance, nullptr);
+        dev.instance = VK_NULL_HANDLE;
+        dev.physical = VK_NULL_HANDLE;
+        return nullptr;
+    }
     logf("vk: %s, Vulkan %u.%u, driver %#x; mesh shaders %s, host memory import %s, pipeline libraries %s",
          dev.props.deviceName, VK_VERSION_MAJOR(dev.props.apiVersion), VK_VERSION_MINOR(dev.props.apiVersion),
          dev.props.driverVersion, dev.mesh_shader ? "yes" : "no", dev.external_memory_host ? "yes" : "no",
