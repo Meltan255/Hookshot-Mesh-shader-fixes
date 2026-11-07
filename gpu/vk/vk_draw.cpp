@@ -24,7 +24,6 @@
 #include <thread>
 
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
-#include "vk_mesh_compute.h"
 
 #include "vk_draw.h"
 #include "vk_dump.h"

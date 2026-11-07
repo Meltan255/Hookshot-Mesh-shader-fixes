@@ -38,6 +38,8 @@ constexpr u32 GUEST_PAGES_PUSH_OFFSET = sizeof(RescalingLayout) + sizeof(RenderA
 // (hookshot) a task program's first workgroup: NVN draws tasks [first, first + count), Vulkan from 0. The address of the draw's first
 // (a u32, 16 bytes per draw of an indirect draw, read at + DrawIndex * 16) is pushed here
 constexpr u32 MESH_FIRST_PUSH_OFFSET = GUEST_PAGES_PUSH_OFFSET + 8;
+constexpr u32 MESH_COMPUTE_COMMANDS_PUSH_OFFSET = MESH_FIRST_PUSH_OFFSET + 8;
+constexpr u32 MESH_COMPUTE_VERTICES_PUSH_OFFSET = MESH_COMPUTE_COMMANDS_PUSH_OFFSET + 8;
 
 [[nodiscard]] std::vector<u32> EmitSPIRV(const Profile& profile, const RuntimeInfo& runtime_info, IR::Program& program, Bindings& bindings);
 [[nodiscard]] inline std::vector<u32> EmitSPIRV(const Profile& profile, IR::Program& program) {

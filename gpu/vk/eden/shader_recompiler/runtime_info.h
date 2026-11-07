@@ -90,6 +90,7 @@ struct RuntimeInfo {
     std::bitset<32> per_primitive_generics{};
     std::map<IR::Attribute, IR::Attribute> previous_stage_legacy_stores_mapping;
 
+    bool mesh_compute_emulation{}; // NVN mesh stage emitted as compute for GPUs without VK_EXT_mesh_shader
     bool convert_depth_mode{};
     bool force_early_z{};
 
