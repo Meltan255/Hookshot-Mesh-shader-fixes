@@ -263,6 +263,14 @@ thread_local VkCommandBuffer rec_cmd = VK_NULL_HANDLE;
 thread_local uint64_t rec_value = 0;
 
 // ---- per recording: a descriptor pool and an upload stream (reset when the recording is reused) ----
+struct MeshOutputBuffers {
+    VkBuffer commands = VK_NULL_HANDLE;
+    VmaAllocation commands_alloc = nullptr;
+    uint64_t commands_capacity = 0;
+    VkBuffer vertices = VK_NULL_HANDLE;
+    VmaAllocation vertices_alloc = nullptr;
+    uint64_t vertices_capacity = 0;
+};
 struct RecordingRes {
     VkDescriptorPool pool = VK_NULL_HANDLE;
     std::vector<VkDescriptorPool> extra;   // (pools added when the first ran out)
@@ -271,6 +279,8 @@ struct RecordingRes {
     uint8_t* mapped = nullptr;
     uint64_t used = 0;
     std::unordered_map<const void*, uint64_t> c1_at;   // (c1 of a stage: uploaded once a recording)
+    MeshOutputBuffers mesh_output;   // reusable in this slot; kept until this recording is complete
+    std::vector<MeshOutputBuffers> retired_mesh_outputs; // larger replacements stay alive until slot reuse
 };
 constexpr uint64_t kStream = 24u << 20;   // (a recording's: 24 of them, vk_replay.cpp kRecordings)
 std::deque<RecordingRes> res;   // (a deque: a recording thread keeps its own in place while another is added)
@@ -2629,6 +2639,13 @@ void draw_begin_recording(int slot, VkCommandBuffer cmd, uint64_t value) {
     ParLock lk;
     if ((size_t)slot >= res.size()) res.resize((size_t)slot + 1);
     RecordingRes& r = res[slot];
+    // The slot is reused only after its previous submission completed. Retired output
+    // buffers can now be released; the active pair remains available for reuse.
+    for (MeshOutputBuffers& b : r.retired_mesh_outputs) {
+        if (b.commands) destroy_buffer(b.commands, b.commands_alloc);
+        if (b.vertices) destroy_buffer(b.vertices, b.vertices_alloc);
+    }
+    r.retired_mesh_outputs.clear();
     if (!r.pool) {
         r.pool = make_pool();
         void* mapped = nullptr;
@@ -3872,8 +3889,8 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
         topo = p.mesh_compute_corners == 2 ? VK_PRIMITIVE_TOPOLOGY_LINE_LIST
                                            : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     }
-    uint64_t mesh_compute_commands_at = 0;
-    uint64_t mesh_compute_vertices_at = 0;
+    VkBuffer mesh_compute_commands_buffer = VK_NULL_HANDLE;
+    VkBuffer mesh_compute_vertices_buffer = VK_NULL_HANDLE;
     uint64_t mesh_compute_commands_address = 0;
     uint64_t mesh_compute_vertices_address = 0;
     uint64_t mesh_compute_vertex_bytes = 0;
@@ -3985,30 +4002,50 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
         mesh_compute_vertex_bytes =
             static_cast<uint64_t>(mesh_compute_groups) * vertices_per_group * sizeof(MeshComputeVertex);
         const uint64_t command_bytes = static_cast<uint64_t>(mesh_compute_groups) * sizeof(MeshComputeDraw);
-        if (!cur || !cur->stream || !cur->mapped) {
-            logf("vk: compute mesh fallback skipped: no mapped recording stream");
+        if (!cur) {
+            logf("vk: compute mesh fallback skipped: no active recording");
             SKIP_HERE();
         }
-        mesh_compute_commands_at = stream_alloc(command_bytes, 16);
-        mesh_compute_vertices_at = stream_alloc(mesh_compute_vertex_bytes, 16);
-        if (mesh_compute_commands_at == UINT64_MAX || mesh_compute_vertices_at == UINT64_MAX) {
-            static std::atomic<int> full{0};
-            if (full++ < 12) logf("vk: compute mesh fallback output exceeds the recording's 24 MB stream");
-            SKIP_HERE();
+        if (!cur->mesh_output.commands || cur->mesh_output.commands_capacity < command_bytes ||
+            !cur->mesh_output.vertices || cur->mesh_output.vertices_capacity < mesh_compute_vertex_bytes) {
+            MeshOutputBuffers replacement{};
+            const VkBufferUsageFlags command_usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+            const VkBufferUsageFlags vertex_usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+            if (!create_device_buffer(command_bytes, command_usage, replacement.commands,
+                                      replacement.commands_alloc)) {
+                logf("vk: could not allocate %llu bytes for compute mesh indirect commands",
+                     static_cast<unsigned long long>(command_bytes));
+                SKIP_HERE();
+            }
+            if (!create_device_buffer(mesh_compute_vertex_bytes, vertex_usage, replacement.vertices,
+                                      replacement.vertices_alloc)) {
+                destroy_buffer(replacement.commands, replacement.commands_alloc);
+                logf("vk: could not allocate %llu bytes for compute mesh vertices",
+                     static_cast<unsigned long long>(mesh_compute_vertex_bytes));
+                SKIP_HERE();
+            }
+            replacement.commands_capacity = command_bytes;
+            replacement.vertices_capacity = mesh_compute_vertex_bytes;
+            if (cur->mesh_output.commands || cur->mesh_output.vertices)
+                cur->retired_mesh_outputs.push_back(cur->mesh_output);
+            cur->mesh_output = replacement;
         }
-        std::memset(cur->mapped + mesh_compute_commands_at, 0, static_cast<size_t>(command_bytes));
-        std::memset(cur->mapped + mesh_compute_vertices_at, 0, static_cast<size_t>(mesh_compute_vertex_bytes));
-        flush_mapped(cur->stream_alloc, cur->used);
+        mesh_compute_commands_buffer = cur->mesh_output.commands;
+        mesh_compute_vertices_buffer = cur->mesh_output.vertices;
 
-        VkBufferDeviceAddressInfo address_info{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
-        address_info.buffer = cur->stream;
-        const VkDeviceAddress stream_address = vkGetBufferDeviceAddress(dev.device, &address_info);
-        if (!stream_address) {
-            logf("vk: compute mesh fallback skipped: recording stream has no device address");
+        VkBufferDeviceAddressInfo command_address_info{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
+        command_address_info.buffer = mesh_compute_commands_buffer;
+        mesh_compute_commands_address = vkGetBufferDeviceAddress(dev.device, &command_address_info);
+        VkBufferDeviceAddressInfo vertex_address_info{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
+        vertex_address_info.buffer = mesh_compute_vertices_buffer;
+        mesh_compute_vertices_address = vkGetBufferDeviceAddress(dev.device, &vertex_address_info);
+        if (!mesh_compute_commands_address || !mesh_compute_vertices_address) {
+            logf("vk: compute mesh output buffers have no device address");
             SKIP_HERE();
         }
-        mesh_compute_commands_address = stream_address + mesh_compute_commands_at;
-        mesh_compute_vertices_address = stream_address + mesh_compute_vertices_at;
 
         {
             ParLock mesh_pipeline_lock(!p.compute_pipeline);
@@ -4032,6 +4069,10 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
             }
         }
         end_pass(cmd);
+        full_barrier(cmd);
+        // Undefined generic components must read as zero; clear the output before the
+        // mesh compute stage writes the components present in this program.
+        vkCmdFillBuffer(cmd, mesh_compute_vertices_buffer, 0, mesh_compute_vertex_bytes, 0);
         full_barrier(cmd);
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p.compute_pipeline);
         if (!bind_descriptors(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p)) SKIP_HERE();
@@ -4159,13 +4200,12 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
         if (stats_query.cmd && gpu_dump_on) stats_query.state = &s, stats_query.prog = p.key;
     }
     if (p.mesh_compute) {
-        const VkBuffer vertex_buffer = cur->stream;
-        const VkDeviceSize vertex_offset = mesh_compute_vertices_at;
+        const VkDeviceSize vertex_offset = 0;
         const VkDeviceSize vertex_size = mesh_compute_vertex_bytes;
         const VkDeviceSize vertex_stride = sizeof(MeshComputeVertex);
-        vkCmdBindVertexBuffers2(cmd, 0, 1, &vertex_buffer, &vertex_offset, &vertex_size, &vertex_stride);
-        vkCmdDrawIndirect(cmd, cur->stream, mesh_compute_commands_at,
-                          mesh_compute_groups, sizeof(MeshComputeDraw));
+        vkCmdBindVertexBuffers2(cmd, 0, 1, &mesh_compute_vertices_buffer, &vertex_offset, &vertex_size,
+                               &vertex_stride);
+        vkCmdDrawIndirect(cmd, mesh_compute_commands_buffer, 0, mesh_compute_groups, sizeof(MeshComputeDraw));
         last_vb_valid = false;
         st_draws++, pass.draws++;
         return;
