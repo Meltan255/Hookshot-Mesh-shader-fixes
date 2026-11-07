@@ -1907,13 +1907,15 @@ void EmitContext::DefineInputs(const IR::Program& program) {
         const bool is_integer = input_type == AttributeType::SignedInt ||
                                 input_type == AttributeType::UnsignedInt;
         if (runtime_info.per_primitive_generics.test(index)) {
-            // Written per primitive by a mesh program: constant over the primitive.
+            // Written per primitive by a native mesh program: constant over the primitive.
             AddExtension("SPV_EXT_mesh_shader");
             AddCapability(spv::Capability::MeshShadingEXT);
             Decorate(id, spv::Decoration::PerPrimitiveEXT);
-            if (is_integer) {
-                Decorate(id, spv::Decoration::Flat);
-            }
+            if (is_integer) Decorate(id, spv::Decoration::Flat);
+            continue;
+        }
+        if (runtime_info.flat_generics.test(index) || is_integer) {
+            Decorate(id, spv::Decoration::Flat);
             continue;
         }
         if (is_integer) {

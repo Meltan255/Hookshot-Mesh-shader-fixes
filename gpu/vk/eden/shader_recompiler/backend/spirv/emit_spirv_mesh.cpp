@@ -243,6 +243,17 @@ void EmitMeshPrologue(EmitContext& ctx) {
     if (ctx.stage != Stage::Mesh) {
         return;
     }
+    // The no-task compute fallback has no task stage to initialise the payload.
+    if (ctx.runtime_info.mesh_compute_emulation) {
+        const Id invocation{LocalInvocation(ctx)};
+        for (u32 first = 0; first < ctx.mesh_info.payload_words; first += ctx.mesh_threads) {
+            const Id word{ctx.OpIAdd(ctx.U32[1], invocation, ctx.Const(first))};
+            If(ctx, ctx.OpULessThan(ctx.U1, word, ctx.Const(ctx.mesh_info.payload_words)), [&] {
+                ctx.OpStore(PayloadWord(ctx, word), ctx.u32_zero_value);
+            });
+        }
+        Barrier(ctx);
+    }
     // Every invocation stores the zero: no branch here, the entry block's label is a phi
     // predecessor for later blocks.
     ctx.OpStore(ctx.mesh_primitive_count, ctx.u32_zero_value);
@@ -283,7 +294,8 @@ void MeshComputeEpilogue(EmitContext& ctx) {
     const u32 corners = mesh.topology == 1 ? 2U : 3U;
     const u32 vertex_lines = static_cast<u32>(mesh.vertex_lines.size());
     const u32 primitive_lines = static_cast<u32>(mesh.primitive_lines.size());
-    const bool convert_depth = ctx.runtime_info.convert_depth_mode && !ctx.profile.support_native_ndc;
+    const bool convert_depth = ctx.runtime_info.convert_depth_mode && !ctx.profile.support_native_ndc &&
+                               pz >= 0 && pw >= 0;
     const auto line_index = [](const std::vector<u32>& lines, IR::Attribute attribute) -> int {
         const auto it = std::ranges::find(lines, static_cast<u32>(attribute));
         return it == lines.end() ? -1 : static_cast<int>(it - lines.begin());
@@ -308,7 +320,12 @@ void MeshComputeEpilogue(EmitContext& ctx) {
                     const Id addr = ctx.OpIAdd(ctx.U64, vertices, byte_offset);
                     ctx.OpStore(MeshComputeOutputWord(ctx, addr, ctx.Const(0U)), value);
                 };
-                Id z_value = ctx.u32_zero_value, w_value = ctx.Const(0x3f800000U);
+                const Id default_w = ctx.Const(0x3f800000U);
+                store_word(0, ctx.u32_zero_value);
+                store_word(1, ctx.u32_zero_value);
+                store_word(2, ctx.u32_zero_value);
+                store_word(3, default_w);
+                Id z_value = ctx.u32_zero_value, w_value = default_w;
                 if (pz >= 0) z_value = MeshAttributeWord(ctx, vertex, 0, static_cast<u32>(pz), vertex_lines);
                 if (pw >= 0) w_value = MeshAttributeWord(ctx, vertex, 0, static_cast<u32>(pw), vertex_lines);
                 for (u32 line = 0; line < vertex_lines; ++line) {

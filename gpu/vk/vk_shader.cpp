@@ -27,6 +27,7 @@
 #include "shader_recompiler/ir_opt/oot_visual_workaround.h"
 #include "shader_recompiler/backend/bindings.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
+#include <sirit/sirit.h>
 #include "shader_recompiler/environment.h"
 #include "shader_recompiler/exception.h"
 #include "shader_recompiler/frontend/ampere/lower_to_maxwell.h"
@@ -1203,6 +1204,49 @@ int bank_stage(const Code& c) {
     return c.stage >= 0 && c.stage < kNvnStages ? c.stage : 0;   // (NVN2: task 6, mesh 7, with their own bindings)
 }
 
+std::vector<uint32_t> emit_mesh_compute_vertex_shader(const std::bitset<32>& generics) {
+    Sirit::Module module{profile().supported_spirv};
+    module.AddCapability(spv::Capability::Shader);
+    const Sirit::Id f32{module.TypeFloat(32)};
+    const Sirit::Id vec4{module.TypeVector(f32, 4)};
+    const Sirit::Id void_type{module.TypeVoid()};
+    const Sirit::Id input_ptr{module.TypePointer(spv::StorageClass::Input, vec4)};
+    const Sirit::Id output_ptr{module.TypePointer(spv::StorageClass::Output, vec4)};
+    std::vector<Sirit::Id> interfaces;
+    const Sirit::Id in_position{module.AddGlobalVariable(input_ptr, spv::StorageClass::Input)};
+    module.Decorate(in_position, spv::Decoration::Location, 0U);
+    module.Name(in_position, "mesh_compute_position");
+    interfaces.push_back(in_position);
+    const Sirit::Id out_position{module.AddGlobalVariable(output_ptr, spv::StorageClass::Output)};
+    module.Decorate(out_position, spv::Decoration::BuiltIn, spv::BuiltIn::Position);
+    module.Name(out_position, "gl_Position");
+    interfaces.push_back(out_position);
+    std::array<Sirit::Id, 32> in_generic{}, out_generic{};
+    uint32_t input_location = 1;
+    for (u32 i = 0; i < 32; ++i) {
+        if (!generics.test(i)) continue;
+        in_generic[i] = module.AddGlobalVariable(input_ptr, spv::StorageClass::Input);
+        module.Decorate(in_generic[i], spv::Decoration::Location, input_location++);
+        module.Name(in_generic[i], std::string("mesh_compute_in_") + std::to_string(i));
+        interfaces.push_back(in_generic[i]);
+        out_generic[i] = module.AddGlobalVariable(output_ptr, spv::StorageClass::Output);
+        module.Decorate(out_generic[i], spv::Decoration::Location, i);
+        module.Name(out_generic[i], std::string("mesh_compute_out_") + std::to_string(i));
+        interfaces.push_back(out_generic[i]);
+    }
+    const Sirit::Id function_type{module.TypeFunction(void_type)};
+    const Sirit::Id main{module.OpFunction(void_type, spv::FunctionControlMask::MaskNone, function_type)};
+    module.AddLabel();
+    module.OpStore(out_position, module.OpLoad(vec4, in_position));
+    for (u32 i = 0; i < 32; ++i) {
+        if (generics.test(i)) module.OpStore(out_generic[i], module.OpLoad(vec4, in_generic[i]));
+    }
+    module.OpReturn();
+    module.OpFunctionEnd();
+    module.AddEntryPoint(spv::ExecutionModel::Vertex, main, "main", std::span(interfaces));
+    return module.Assemble();
+}
+
 void translate_mesh_into(Program& p, const NvnState& s, const Code* task, const Code& mesh, const Code* prim,
                          const Code* fsc, const uint8_t color_types[8]) {
     const auto t0 = std::chrono::steady_clock::now();
@@ -1258,15 +1302,59 @@ void translate_mesh_into(Program& p, const NvnState& s, const Code* task, const 
         if (task_t) mrt.previous_stage_stores = task_t->program.info.stores;
         else mrt.previous_stage_stores.mask.set();
         mrt.convert_depth_mode = host->depth_minus_w() != 0;
+        mrt.mesh_compute_emulation = !dev.mesh_shader && task == nullptr;
         const std::vector<uint32_t> mspirv = Shader::Backend::SPIRV::EmitSPIRV(profile(), mrt, mesh_t->program, bindings);
         kept.push_back(mspirv);
         Stage ms;
         ms.nvn_stage = bank_stage(mesh);
         ms.info = mesh_t->program.info;
         ms.module = make_module(mspirv);
-        ms.vk_stage = VK_SHADER_STAGE_MESH_BIT_EXT;
+        ms.vk_stage = mrt.mesh_compute_emulation ? VK_SHADER_STAGE_COMPUTE_BIT : VK_SHADER_STAGE_MESH_BIT_EXT;
         ms.c1 = mesh.c1;
         p.stages.push_back(std::move(ms));
+        if (mrt.mesh_compute_emulation) {
+            const auto& mi = mesh_t->program.mesh;
+            const auto supported_attribute = [](u32 value) {
+                const auto a = static_cast<Shader::IR::Attribute>(value);
+                return (a >= Shader::IR::Attribute::PositionX && a <= Shader::IR::Attribute::PositionW) ||
+                       Shader::IR::IsGeneric(a);
+            };
+            if (!std::ranges::all_of(mi.vertex_lines, supported_attribute) ||
+                !std::ranges::all_of(mi.primitive_lines, [](u32 value) {
+                    return Shader::IR::IsGeneric(static_cast<Shader::IR::Attribute>(value));
+                })) {
+                throw Shader::NotImplementedException("compute mesh fallback: unsupported point-size or per-primitive builtin output");
+            }
+            p.mesh_compute = true;
+            p.mesh_compute_max_primitives = mi.max_primitives;
+            p.mesh_compute_corners = mi.topology == 1 ? 2U : 3U;
+            p.workgroup = {mesh_t->program.workgroup_size[0], 1U, 1U};
+            p.shared_memory = mesh_t->program.shared_memory_size;
+            for (u32 value : mi.vertex_lines) {
+                const auto a = static_cast<Shader::IR::Attribute>(value);
+                if (Shader::IR::IsGeneric(a)) p.mesh_compute_generics.set(Shader::IR::GenericAttributeIndex(a));
+            }
+            for (u32 value : mi.primitive_lines) {
+                const auto a = static_cast<Shader::IR::Attribute>(value);
+                if (Shader::IR::IsGeneric(a)) p.mesh_compute_generics.set(Shader::IR::GenericAttributeIndex(a));
+            }
+            if (p.mesh_compute_generics.count() + 1 > dev.props.limits.maxVertexInputAttributes) {
+                throw Shader::NotImplementedException("compute mesh fallback: too many generated vertex attributes for this GPU");
+            }
+            Stage v;
+            v.nvn_stage = 0;
+            const auto vertex_spirv = emit_mesh_compute_vertex_shader(p.mesh_compute_generics);
+            v.module = make_module(vertex_spirv);
+            v.vk_stage = VK_SHADER_STAGE_VERTEX_BIT;
+            kept.push_back(vertex_spirv);
+            p.stages.push_back(std::move(v));
+            p.mesh = false;
+            static std::atomic<int> compute_mesh_logged{0};
+            if (compute_mesh_logged++ < 12) {
+                logf("vk: mesh %016llx using no-task compute fallback: %u primitives/workgroup, %u corners, %zu generic outputs",
+                     (unsigned long long)p.key, mi.max_primitives, p.mesh_compute_corners, p.mesh_compute_generics.count());
+            }
+        }
         if (fsc) {
             Env fenv{s, *fsc, Shader::Stage::Fragment};
             auto fs = translate(fenv, true);
@@ -1276,8 +1364,10 @@ void translate_mesh_into(Program& p, const NvnState& s, const Code* task, const 
             frt.previous_stage_stores = mesh_t->program.info.stores;
             for (const u32 line : mesh_t->program.mesh.primitive_lines) {
                 const auto attribute = static_cast<Shader::IR::Attribute>(line);
-                if (Shader::IR::IsGeneric(attribute))
-                    frt.per_primitive_generics.set(Shader::IR::GenericAttributeIndex(attribute));
+                if (Shader::IR::IsGeneric(attribute)) {
+                    if (p.mesh_compute) frt.flat_generics.set(Shader::IR::GenericAttributeIndex(attribute));
+                    else frt.per_primitive_generics.set(Shader::IR::GenericAttributeIndex(attribute));
+                }
             }
             for (int i = 0; i < 8; i++) frt.color_output_types[i] = static_cast<Shader::AttributeType>(color_types[i]);
             const std::vector<uint32_t> fspirv = Shader::Backend::SPIRV::EmitSPIRV(profile(), frt, fs->program, bindings);
@@ -1318,7 +1408,6 @@ void translate_mesh_into(Program& p, const NvnState& s, const Code* task, const 
 /// An NVN2 mesh program: the stages that write the internal stage buffer are its task (attribute writes only, when
 /// there are two) and mesh programs; a header-only stage, its per-primitive outputs (shader_lock held)
 const Program* mesh_program_locked(const NvnState& s, const uint8_t color_types[8]) {
-    if (!dev.mesh_shader) return nullptr;
     const std::vector<Code>& cs = codes_of(s);
     const Code *fsc = nullptr, *prim = nullptr, *task = nullptr, *mesh = nullptr;
     for (const Code& c : cs) {
@@ -1330,6 +1419,11 @@ const Program* mesh_program_locked(const NvnState& s, const uint8_t color_types[
     static int logged;
     if (logged++ < 6) log_program_stages(s, "mesh draw");
     if (!mesh) return nullptr;
+    if (!dev.mesh_shader && task) {
+        static std::atomic<int> task_fallback_logged{0};
+        if (task_fallback_logged++ < 12) logf("vk: mesh draw has a task stage; compute fallback currently supports no-task mesh draws only");
+        return nullptr;
+    }
     const uint64_t key = mesh_key(task, *mesh, fsc, prim, color_types);
     auto& variants = programs[key];
     program_cache_load(key, variants);
@@ -1341,7 +1435,7 @@ const Program* mesh_program_locked(const NvnState& s, const uint8_t color_types[
     miss_note(key, "mesh", mesh->key, fsc ? fsc->key : 0, s, color_types, variants.size());
     auto p = std::make_unique<Program>();
     p->key = key;
-    p->mesh = true;
+    p->mesh = dev.mesh_shader;
     Program* raw = p.get();
     variants.push_back(std::move(p));
     struct Job {
