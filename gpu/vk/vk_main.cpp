@@ -279,12 +279,16 @@ bool create_device() {
     }
     mesh.multiviewMeshShader = mesh.primitiveFragmentShadingRateMeshShader = VK_FALSE;   // (not used)
     dev.mesh_shader = dev.mesh_shader && mesh.meshShader && mesh.taskShader;
-    // RX 580 compatibility experiment: when asked, decline this renderer if its native task/mesh
-    // stages are unavailable. host/rx_backend.c then starts the existing WebGPU renderer instead.
-    // This is a partial fallback only: WebGPU does not emulate mesh-stage output geometry.
-    const char* fallback_no_mesh = getenv("RX_VK_FALLBACK_NO_MESH");
-    if (!dev.mesh_shader && fallback_no_mesh && std::strcmp(fallback_no_mesh, "0") != 0) {
-        logf("vk: RX_VK_FALLBACK_NO_MESH: no task/mesh shader support; handing off to WebGPU (mesh-generated geometry is not emulated)");
+    // RX_VK_FALLBACK_NO_MESH belonged to the earlier WebGPU hand-off test. It is intentionally
+    // ignored now: on devices without VK_EXT_mesh_shader, eligible no-task mesh draws are
+    // translated to compute and rendered with a conventional vertex pipeline.
+    if (!dev.mesh_shader && getenv("RX_VK_FALLBACK_NO_MESH")) {
+        logf("vk: RX_VK_FALLBACK_NO_MESH is obsolete and ignored; attempting the Vulkan compute mesh fallback");
+    }
+    // Explicit escape hatch for comparing against the previous WebGPU hand-off experiment.
+    const char* force_webgpu = getenv("RX_VK_FORCE_WEBGPU");
+    if (!dev.mesh_shader && force_webgpu && std::strcmp(force_webgpu, "0") != 0) {
+        logf("vk: RX_VK_FORCE_WEBGPU: handing off to WebGPU by request");
         return false;
     }
     if (robust) logf("vk: robust buffer access %s", robust_ok ? "on" : "not supported");
