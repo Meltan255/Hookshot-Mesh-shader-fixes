@@ -294,14 +294,14 @@ void MeshComputeEpilogue(EmitContext& ctx) {
     const u32 corners = mesh.topology == 1 ? 2U : 3U;
     const u32 vertex_lines = static_cast<u32>(mesh.vertex_lines.size());
     const u32 primitive_lines = static_cast<u32>(mesh.primitive_lines.size());
-    const bool convert_depth = ctx.runtime_info.convert_depth_mode && !ctx.profile.support_native_ndc &&
-                               pz >= 0 && pw >= 0;
     const auto line_index = [](const std::vector<u32>& lines, IR::Attribute attribute) -> int {
         const auto it = std::ranges::find(lines, static_cast<u32>(attribute));
         return it == lines.end() ? -1 : static_cast<int>(it - lines.begin());
     };
     const int pz = line_index(mesh.vertex_lines, IR::Attribute::PositionZ);
     const int pw = line_index(mesh.vertex_lines, IR::Attribute::PositionW);
+    const bool convert_depth = ctx.runtime_info.convert_depth_mode && !ctx.profile.support_native_ndc &&
+                               pz >= 0 && pw >= 0;
     const Id invocation = LocalInvocation(ctx);
     for (u32 first = 0; first < mesh.max_primitives; first += ctx.mesh_threads) {
         const Id primitive = ctx.OpIAdd(ctx.U32[1], invocation, ctx.Const(first));

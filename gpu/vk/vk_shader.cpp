@@ -1319,10 +1319,17 @@ void translate_mesh_into(Program& p, const NvnState& s, const Code* task, const 
                 return (a >= Shader::IR::Attribute::PositionX && a <= Shader::IR::Attribute::PositionW) ||
                        Shader::IR::IsGeneric(a);
             };
-            if (!std::ranges::all_of(mi.vertex_lines, supported_attribute) ||
+            const auto has_vertex_component = [&](Shader::IR::Attribute wanted) {
+                return std::ranges::find(mi.vertex_lines, static_cast<u32>(wanted)) != mi.vertex_lines.end();
+            };
+            if ((mi.topology != 1 && mi.topology != 3) ||
+                !std::ranges::all_of(mi.vertex_lines, supported_attribute) ||
                 !std::ranges::all_of(mi.primitive_lines, [](u32 value) {
                     return Shader::IR::IsGeneric(static_cast<Shader::IR::Attribute>(value));
-                })) {
+                }) ||
+                !has_vertex_component(Shader::IR::Attribute::PositionX) ||
+                !has_vertex_component(Shader::IR::Attribute::PositionY) ||
+                !has_vertex_component(Shader::IR::Attribute::PositionZ)) {
                 throw Shader::NotImplementedException("compute mesh fallback: unsupported point-size or per-primitive builtin output");
             }
             p.mesh_compute = true;
@@ -1385,7 +1392,7 @@ void translate_mesh_into(Program& p, const NvnState& s, const Code* task, const 
         record_answers(p, s);   // (task questions not counted: kept conservative)
         (void)questions;
         ptr_diag_log(p.key, task ? "task+mesh" : "mesh");
-        program_cache_save(p, kept);
+        if (!p.mesh_compute) program_cache_save(p, kept);
         // (where its stages read their storage buffers: the driver bank layout of NVN2's stages 6 and 7)
         static std::atomic<int> logged_ssbo;
         for (const Stage& st : p.stages)
