@@ -62,7 +62,7 @@ checks = {
     "task fallback permits only workgroup-local side effects": (
         "case Shader::IR::Opcode::WriteSharedU32:" in SHADER
         and "case Shader::IR::Opcode::SharedAtomicExchange32:" in SHADER
-        and "default:\\n                return true;" in SHADER
+        and "default:\n                return true;" in SHADER
     ),
     "64-bit physical storage address support is required": (
         "compute mesh fallback: 64-bit physical storage addresses are unavailable" in SHADER
