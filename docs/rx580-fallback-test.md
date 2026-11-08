@@ -19,11 +19,11 @@ The Windows workflow downloads the current full Builder tools bundle, overlays t
 
 ## What this build attempts
 
-When Vulkan lacks `VK_EXT_mesh_shader`, eligible mesh programs that have **no task stage** are translated to compute. The direct one-dimensional dispatch preserves its `firstTask` offset for the guest-visible mesh `WorkgroupId`, while the compute output uses local workgroup indices. Generated vertices and indirect draw commands are written, and a conventional vertex/fragment pipeline renders the result.
+When Vulkan lacks `VK_EXT_mesh_shader`, eligible mesh programs are translated to compute. No-task draws preserve `firstTask` in the guest-visible mesh `WorkgroupId`. Direct one-dimensional task+mesh draws additionally write task payload/count records to a GPU buffer, barrier between task and mesh compute, and render the generated mesh vertices through a conventional vertex/fragment pipeline. This task path is experimental; indirect task/mesh draws are still skipped.
 
 ## Important limitations
 
-This is still an early partial fallback, not a complete mesh-shader replacement. Mesh draws with task stages, indirect mesh draws and unsupported output built-ins remain unsupported and may be skipped. Some geometry or visual effects may still be missing. The source has not yet been confirmed on an RX 580; a successful Builder package or renderer compile does not prove that the game renders correctly.
+This is still an early partial fallback, not a complete mesh-shader replacement. The task path dispatches a bounded maximum number of mesh children and writes empty output for children the task culled; side effects in over-dispatched empty children still need validation. Indirect task/mesh draws and unsupported output built-ins remain unsupported. Some geometry or visual effects may still be missing. The source has not yet been confirmed on an RX 580; a successful Builder package or renderer compile does not prove that the game renders correctly.
 
 ## What to report
 
