@@ -1960,9 +1960,17 @@ void EmitContext::DefineMesh(const IR::Program& program) {
         AddCapability(spv::Capability::MeshShadingEXT);
     } else {
         wants_mesh_compute_output = true;
+        // A no-task mesh dispatch still observes NVN's firstTask offset. The
+        // generated output buffer must continue to use the local WorkgroupId.
+        wants_mesh_first = true;
         AddCapability(spv::Capability::PhysicalStorageBufferAddresses);
         AddExtension("SPV_KHR_physical_storage_buffer");
         SetMemoryModel(spv::AddressingModel::PhysicalStorageBuffer64, spv::MemoryModel::GLSL450);
+        const Id first_block = TypeStruct(U32[1]);
+        Decorate(first_block, spv::Decoration::Block);
+        MemberDecorate(first_block, 0, spv::Decoration::Offset, 0U);
+        mesh_first_block_pointer = TypePointer(spv::StorageClass::PhysicalStorageBuffer, first_block);
+        mesh_first_member_pointer = TypePointer(spv::StorageClass::PhysicalStorageBuffer, U32[1]);
         const Id words = TypeRuntimeArray(U32[1]);
         Decorate(words, spv::Decoration::ArrayStride, 4U);
         const Id block = TypeStruct(words);
