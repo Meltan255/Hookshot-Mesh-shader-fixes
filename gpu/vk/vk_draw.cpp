@@ -271,6 +271,11 @@ struct MeshOutputBuffers {
     VmaAllocation vertices_alloc = nullptr;
     uint64_t vertices_capacity = 0;
 };
+struct TaskOutputBuffers {
+    VkBuffer payloads = VK_NULL_HANDLE;
+    VmaAllocation payloads_alloc = nullptr;
+    uint64_t payloads_capacity = 0;
+};
 struct RecordingRes {
     VkDescriptorPool pool = VK_NULL_HANDLE;
     std::vector<VkDescriptorPool> extra;   // (pools added when the first ran out)
@@ -281,6 +286,8 @@ struct RecordingRes {
     std::unordered_map<const void*, uint64_t> c1_at;   // (c1 of a stage: uploaded once a recording)
     MeshOutputBuffers mesh_output;   // reusable in this slot; kept until this recording is complete
     std::vector<MeshOutputBuffers> retired_mesh_outputs; // larger replacements stay alive until slot reuse
+    TaskOutputBuffers task_output;   // task shader payload/count records for this recording
+    std::vector<TaskOutputBuffers> retired_task_outputs;
 };
 constexpr uint64_t kStream = 24u << 20;   // (a recording's: 24 of them, vk_replay.cpp kRecordings)
 std::deque<RecordingRes> res;   // (a deque: a recording thread keeps its own in place while another is added)
@@ -466,7 +473,7 @@ VkFormat supported_vertex_format(VkFormat f) {
 }
 
 // ---- pipeline layouts and pipelines ----
-constexpr uint32_t kPushSize = Shader::Backend::SPIRV::MESH_COMPUTE_VERTICES_PUSH_OFFSET + 8;
+constexpr uint32_t kPushSize = Shader::Backend::SPIRV::MESH_TASK_OUTPUT_PUSH_OFFSET + 8;
 
 void ensure_layout(Program& p) {
     if (p.layout) return;
@@ -505,7 +512,7 @@ void ensure_layout(Program& p) {
     vkCreatePipelineLayout(dev.device, &pi, nullptr, &layout);
     p.push_stages = stages;
     for (const Stage& st : p.stages) p.uses_render_area |= st.info.uses_render_area;
-    p.uses_push = p.uses_render_area || p.mesh_compute;
+    p.uses_push = p.uses_render_area || p.mesh_compute || p.task_compute;
     for (const Stage& st : p.stages) p.uses_push |= st.info.uses_rescaling_uniform;
     static const bool follow_graphics = !getenv("RX_VK_FOLLOW_GRAPHICS") || atoi(getenv("RX_VK_FOLLOW_GRAPHICS")) != 0;
     for (const Stage& st : p.stages)   // (the page table; EvilOOT: and graphics stages with RX_VK_FOLLOW_GRAPHICS)
@@ -2649,6 +2656,10 @@ void draw_begin_recording(int slot, VkCommandBuffer cmd, uint64_t value) {
         if (b.vertices) destroy_buffer(b.vertices, b.vertices_alloc);
     }
     r.retired_mesh_outputs.clear();
+    for (TaskOutputBuffers& b : r.retired_task_outputs) {
+        if (b.payloads) destroy_buffer(b.payloads, b.payloads_alloc);
+    }
+    r.retired_task_outputs.clear();
     if (!r.pool) {
         r.pool = make_pool();
         void* mapped = nullptr;
