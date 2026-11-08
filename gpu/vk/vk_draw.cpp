@@ -3770,7 +3770,8 @@ bool mesh_args_ready() {
     static const bool ok = [] {
         void* mapped = nullptr;
         if (!create_buffer((uint64_t)kMeshArgs * 16,
-                           VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, true,
+                           VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                               VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, true,
                            mesh_args_buffer, mesh_args_alloc, &mapped) || !mapped)
             return false;
         uint32_t* w = (uint32_t*)mapped;
