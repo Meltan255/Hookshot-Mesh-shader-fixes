@@ -66,6 +66,14 @@ checks = {
     ),
     "task fallback rejects indirect and non-1D grids": "if (d.indirect || d.groups[0] <= 0" in DRAW and "d.groups[1] != 1 || d.groups[2] != 1" in DRAW,
     "task and mesh payload sizes are checked": "task_t->program.mesh.payload_words != mesh_t->program.mesh.payload_words" in SHADER,
+    "task compute requires one-dimensional local workgroups": (
+        "task_t->program.workgroup_size[1] != 1" in SHADER
+        and "task_t->program.workgroup_size[2] != 1" in SHADER
+    ),
+    "mesh compute requires one-dimensional local workgroups": (
+        "mesh_t->program.workgroup_size[1] != 1" in SHADER
+        and "mesh_t->program.workgroup_size[2] != 1" in SHADER
+    ),
     "task output address is pushed": "MESH_TASK_OUTPUT_PUSH_OFFSET" in DRAW and "mesh_task_output_address" in DRAW,
     "external side effects are rejected only on task-overdispatched mesh stage": (
         "if (!dev.mesh_shader && task_t &&" in SHADER
