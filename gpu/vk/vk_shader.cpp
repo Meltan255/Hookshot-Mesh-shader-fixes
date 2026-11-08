@@ -1390,7 +1390,7 @@ void translate_mesh_into(Program& p, const NvnState& s, const Code* task, const 
         menv.set_mesh(mesh_regs, prim ? prim->sph : nullptr);
         auto mesh_t = translate(menv, true, true);
         dump_ir(p, "mesh", mesh_t->program, mesh.key);
-        if (!dev.mesh_shader &&
+        if (!dev.mesh_shader && task_t &&
             mesh_compute_has_unsupported_side_effects(mesh_t->program)) {
             throw Shader::NotImplementedException(
                 "compute mesh fallback: mesh stage contains external side effects unsafe for over-dispatched culled children");
