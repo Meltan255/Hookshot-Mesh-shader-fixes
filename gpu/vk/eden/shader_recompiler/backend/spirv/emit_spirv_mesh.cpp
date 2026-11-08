@@ -293,9 +293,16 @@ void EmitIsbeWriteMapU32(EmitContext& ctx, const IR::Value& address, Id value) {
 
 void EmitMeshPrologue(EmitContext& ctx) {
     if (ctx.stage == Stage::Task) {
-        // (hookshot) the count starts at nothing: task payload memory holds whatever the last task left, and a task that keeps no meshlet
-        // never writes it. The barrier: every thread has done this before any of them goes on to write the real count
-        ctx.OpStore(PayloadWord(ctx, ctx.Const(1U)), ctx.u32_zero_value);
+        // Workgroup payload storage is reused by the driver-independent compute fallback.
+        // Clear it before this task invocation writes its own payload so unwritten words
+        // cannot leak values from an earlier parent workgroup.
+        const Id invocation{LocalInvocation(ctx)};
+        for (u32 first = 0; first < ctx.mesh_info.payload_words; first += ctx.mesh_threads) {
+            const Id word{ctx.OpIAdd(ctx.U32[1], invocation, ctx.Const(first))};
+            If(ctx, ctx.OpULessThan(ctx.U1, word, ctx.Const(ctx.mesh_info.payload_words)), [&] {
+                ctx.OpStore(PayloadWord(ctx, word), ctx.u32_zero_value);
+            });
+        }
         Barrier(ctx);
     }
     if (ctx.stage != Stage::Mesh) {
