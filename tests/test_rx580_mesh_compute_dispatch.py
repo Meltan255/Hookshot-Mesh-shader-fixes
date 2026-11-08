@@ -57,6 +57,17 @@ checks = {
     "task fallback rejects indirect and non-1D grids": "if (d.indirect || d.groups[0] <= 0" in DRAW and "d.groups[1] != 1 || d.groups[2] != 1" in DRAW,
     "task and mesh payload sizes are checked": "task_t->program.mesh.payload_words != mesh_t->program.mesh.payload_words" in SHADER,
     "task output address is pushed": "MESH_TASK_OUTPUT_PUSH_OFFSET" in DRAW and "mesh_task_output_address" in DRAW,
+    "external side effects are scanned before task fallback": "mesh_compute_has_unsupported_side_effects(task_t->program)" in SHADER,
+    "external side effects are scanned before mesh fallback": "mesh_compute_has_unsupported_side_effects(mesh_t->program)" in SHADER,
+    "task fallback permits only workgroup-local side effects": (
+        "case Shader::IR::Opcode::WriteSharedU32:" in SHADER
+        and "case Shader::IR::Opcode::SharedAtomicExchange32:" in SHADER
+        and "default:\\n                return true;" in SHADER
+    ),
+    "64-bit physical storage address support is required": (
+        "compute mesh fallback: 64-bit physical storage addresses are unavailable" in SHADER
+        and "task compute fallback: 64-bit physical storage addresses are unavailable" in SHADER
+    ),
 }
 
 def flatten_group(x, y, z, dispatch_x, dispatch_y):
