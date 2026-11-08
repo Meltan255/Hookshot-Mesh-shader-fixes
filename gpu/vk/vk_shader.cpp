@@ -1366,6 +1366,7 @@ void translate_mesh_into(Program& p, const NvnState& s, const Code* task, const 
                 throw Shader::NotImplementedException("compute mesh fallback: unsupported point-size or per-primitive builtin output");
             }
             p.mesh_compute = true;
+            p.mesh_compute_payload_words = mi.payload_words;
             p.mesh_compute_max_primitives = mi.max_primitives;
             p.mesh_compute_corners = mi.topology == 1 ? 2U : 3U;
             p.workgroup = {mesh_t->program.workgroup_size[0], 1U, 1U};
