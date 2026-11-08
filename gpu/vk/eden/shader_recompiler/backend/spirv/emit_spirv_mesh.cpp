@@ -283,7 +283,19 @@ void MeshComputeEpilogue(EmitContext& ctx) {
     Barrier(ctx);
     const Id count = ctx.OpUMin(ctx.U32[1], ctx.OpLoad(ctx.U32[1], ctx.mesh_primitive_count),
                                 ctx.Const(mesh.max_primitives));
-    const Id group = ctx.OpCompositeExtract(ctx.U32[1], ctx.OpLoad(ctx.U32[3], ctx.workgroup_id), 0U);
+    // Keep the shader-visible WorkgroupId three-dimensional, but flatten it for the
+    // fallback's contiguous vertex and indirect-command output arrays.
+    const Id workgroup = ctx.OpLoad(ctx.U32[3], ctx.workgroup_id);
+    const Id dispatch = ctx.OpLoad(ctx.U32[3], ctx.num_workgroups);
+    const Id group_x = ctx.OpCompositeExtract(ctx.U32[1], workgroup, 0U);
+    const Id group_y = ctx.OpCompositeExtract(ctx.U32[1], workgroup, 1U);
+    const Id group_z = ctx.OpCompositeExtract(ctx.U32[1], workgroup, 2U);
+    const Id dispatch_x = ctx.OpCompositeExtract(ctx.U32[1], dispatch, 0U);
+    const Id dispatch_y = ctx.OpCompositeExtract(ctx.U32[1], dispatch, 1U);
+    const Id yz = ctx.OpIAdd(ctx.U32[1], group_y,
+                             ctx.OpIMul(ctx.U32[1], dispatch_y, group_z));
+    const Id group = ctx.OpIAdd(ctx.U32[1], group_x,
+                                ctx.OpIMul(ctx.U32[1], dispatch_x, yz));
     const Id group64 = ctx.OpUConvert(ctx.U64, group);
     const Id commands = ctx.OpLoad(ctx.U64,
         ctx.OpAccessChain(ctx.mesh_compute_push_u64, ctx.rescaling_push_constants,
