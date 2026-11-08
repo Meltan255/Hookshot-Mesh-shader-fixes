@@ -1256,7 +1256,7 @@ uint32_t task_compute_groups_per_task(uint32_t task_threads) {
     if (!value || !*value) return task_threads;
     char* end = nullptr;
     const unsigned long long parsed = std::strtoull(value, &end, 10);
-    if (end == value || *end != '\\0' || parsed == 0) return task_threads;
+    if (*value == '-' || end == value || *end != '\0' || parsed == 0) return task_threads;
     return static_cast<uint32_t>(std::min<unsigned long long>(parsed, std::numeric_limits<uint32_t>::max()));
 }
 
