@@ -4,6 +4,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DRAW = (ROOT / "gpu/vk/vk_draw.cpp").read_text(encoding="utf-8")
+REPLAY = (ROOT / "gpu/vk/vk_replay.cpp").read_text(encoding="utf-8")
 CONTEXT = (ROOT / "gpu/vk/eden/shader_recompiler/backend/spirv/spirv_emit_context.cpp").read_text(encoding="utf-8")
 EMITTER = (ROOT / "gpu/vk/eden/shader_recompiler/backend/spirv/emit_spirv_mesh.cpp").read_text(encoding="utf-8")
 
@@ -19,6 +20,7 @@ checks = {
         for axis, index in (("x", 0), ("y", 1), ("z", 2))
     ),
     "dispatch preserves original 3D grid": "vkCmdDispatch(cmd, mesh_compute_group_x, mesh_compute_group_y, mesh_compute_group_z)" in DRAW,
+    "mesh draw replay preserves both direct workgroup counts": "da.groups[0] = d.y, da.groups[1] = d.z, da.groups[2] = 1;" in REPLAY,
     "flattened output allocation uses total workgroups": "xy_groups * mesh_compute_group_z" in DRAW,
 }
 failed = [name for name, passed in checks.items() if not passed]

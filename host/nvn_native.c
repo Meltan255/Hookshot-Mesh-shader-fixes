@@ -2383,7 +2383,7 @@ NV(nvnCommandBufferDrawElementsIndirect) { draw_indirect(c, 1, I(1), I(2), U64(3
 NV(nvnCommandBufferMultiDrawArraysIndirectCount) { draw_indirect(c, 0, I(1), 0, 0, U64(2), U64(3), I(4), I(5)); }
 NV(nvnCommandBufferMultiDrawElementsIndirectCount) { draw_indirect(c, 1, I(1), I(2), U64(3), U64(4), U64(5), I(6), I(7)); }
 NV(nvnCommandBufferDispatchComputeIndirect) { REC(CB(P(0)), NOP_DISPATCH_INDIRECT, nvn_p_dispatch_indirect)->addr = U64(1); }
-/* mesh shading: recorded for the Vulkan replay (VK_EXT_mesh_shader); the WebGPU one has none and leaves it out */
+/* mesh shading: direct DrawMeshTasks takes first task, X group count, Y group count; indirect variants follow */
 static void draw_mesh(Ctx *c, int kind) {
     nvn_p_draw_mesh *r = REC(CB(P(0)), NOP_DRAW_MESH, nvn_p_draw_mesh);
     memset(r, 0, sizeof *r);
