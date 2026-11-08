@@ -40,6 +40,7 @@ constexpr u32 GUEST_PAGES_PUSH_OFFSET = sizeof(RescalingLayout) + sizeof(RenderA
 constexpr u32 MESH_FIRST_PUSH_OFFSET = GUEST_PAGES_PUSH_OFFSET + 8;
 constexpr u32 MESH_COMPUTE_COMMANDS_PUSH_OFFSET = MESH_FIRST_PUSH_OFFSET + 8;
 constexpr u32 MESH_COMPUTE_VERTICES_PUSH_OFFSET = MESH_COMPUTE_COMMANDS_PUSH_OFFSET + 8;
+constexpr u32 MESH_TASK_OUTPUT_PUSH_OFFSET = MESH_COMPUTE_VERTICES_PUSH_OFFSET + 8;
 
 [[nodiscard]] std::vector<u32> EmitSPIRV(const Profile& profile, const RuntimeInfo& runtime_info, IR::Program& program, Bindings& bindings);
 [[nodiscard]] inline std::vector<u32> EmitSPIRV(const Profile& profile, IR::Program& program) {
