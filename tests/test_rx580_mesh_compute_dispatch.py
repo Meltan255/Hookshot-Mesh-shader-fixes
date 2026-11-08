@@ -30,6 +30,11 @@ checks = {
     "mesh compute declares a firstTask push field": "wants_mesh_first = true;" in CONTEXT and "mesh_first_member_index" in CONTEXT,
     "mesh compute has physical firstTask pointer types": "mesh_first_block_pointer = TypePointer(spv::StorageClass::PhysicalStorageBuffer, first_block)" in CONTEXT,
     "mesh shader WorkgroupId includes firstTask": "shader_workgroup = ctx.OpIAdd(ctx.U32[1], workgroup, first);" in EMITTER,
+    "direct WorkgroupId builtin preserves firstTask": (
+        "needs_first_task" in GETSET
+        and "ctx.stage == Shader::Stage::Task && ctx.runtime_info.task_compute_emulation" in GETSET
+        and "ctx.stage == Shader::Stage::Mesh && ctx.runtime_info.mesh_compute_emulation" in GETSET
+    ),
     "mesh output indexing keeps the local WorkgroupId": "OpCompositeExtract(ctx.U32[1], workgroup, 0U)" in EMITTER,
     "firstTask is stored into a per-draw ring entry": "mesh_args_words[first_entry * 4 + 3] = static_cast<uint32_t>(d.first_task)" in DRAW,
     "compute dispatch pushes its direct firstTask address": "push_constants(cmd, p, nullptr, mesh_compute_commands_address" in DRAW and "mesh_compute_first_address" in DRAW,
