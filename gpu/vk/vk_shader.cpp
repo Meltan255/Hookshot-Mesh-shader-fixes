@@ -1358,10 +1358,13 @@ void translate_mesh_into(Program& p, const NvnState& s, const Code* task, const 
             }
             if (task_compute &&
                 (task_t->program.workgroup_size[0] == 0 ||
+                 task_t->program.workgroup_size[1] != 1 ||
+                 task_t->program.workgroup_size[2] != 1 ||
                  task_t->program.workgroup_size[0] > dev.props.limits.maxComputeWorkGroupSize[0] ||
                  task_t->program.workgroup_size[0] > dev.props.limits.maxComputeWorkGroupInvocations ||
                  task_t->program.mesh.payload_words < 2)) {
-                throw Shader::NotImplementedException("task compute fallback: invalid task workgroup or payload size");
+                throw Shader::NotImplementedException(
+                    "task compute fallback: requires a valid 1D task workgroup and payload layout");
             }
             const uint32_t task_groups_per_task = task_compute
                 ? task_compute_groups_per_task(task_t->program.workgroup_size[0]) : 0U;
@@ -1415,9 +1418,12 @@ void translate_mesh_into(Program& p, const NvnState& s, const Code* task, const 
         }
         if (!dev.mesh_shader &&
             (mesh_t->program.workgroup_size[0] == 0 ||
+             mesh_t->program.workgroup_size[1] != 1 ||
+             mesh_t->program.workgroup_size[2] != 1 ||
              mesh_t->program.workgroup_size[0] > dev.props.limits.maxComputeWorkGroupSize[0] ||
              mesh_t->program.workgroup_size[0] > dev.props.limits.maxComputeWorkGroupInvocations)) {
-            throw Shader::NotImplementedException("compute mesh fallback: invalid mesh workgroup size for this device");
+            throw Shader::NotImplementedException(
+                "compute mesh fallback: requires a valid 1D mesh workgroup for this device");
         }
         Shader::RuntimeInfo mrt{};
         if (task_t) mrt.previous_stage_stores = task_t->program.info.stores;
