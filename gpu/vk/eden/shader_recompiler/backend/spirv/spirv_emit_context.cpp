@@ -1753,8 +1753,12 @@ void EmitContext::DefineInputs(const IR::Program& program) {
     const Info& info{program.info};
     const VaryingState loads{info.loads.mask | info.passthrough.mask};
 
-    if (info.uses_workgroup_id) {
+    const bool mesh_compute_emulation = stage == Stage::Mesh && runtime_info.mesh_compute_emulation;
+    if (info.uses_workgroup_id || mesh_compute_emulation) {
         workgroup_id = DefineInput(*this, U32[3], false, spv::BuiltIn::WorkgroupId);
+    }
+    if (mesh_compute_emulation) {
+        num_workgroups = DefineInput(*this, U32[3], false, spv::BuiltIn::NumWorkgroups);
     }
     if (info.uses_local_invocation_id) {
         local_invocation_id = DefineInput(*this, U32[3], false, spv::BuiltIn::LocalInvocationId);
