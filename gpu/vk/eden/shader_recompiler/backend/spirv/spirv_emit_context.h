@@ -311,13 +311,20 @@ public:
     u32 mesh_first_member_index{};    // (hookshot: MESH_FIRST_PUSH_OFFSET's member, task programs)
     bool wants_mesh_first{};
     bool wants_mesh_compute_output{};
+    bool wants_mesh_task_output{};
     u32 mesh_compute_commands_member_index{};
     u32 mesh_compute_vertices_member_index{};
+    u32 mesh_task_output_member_index{};
     Id mesh_compute_push_u64{};
+    Id mesh_task_output_push_u64{};
+    Id mesh_task_output_block_pointer{};
+    Id mesh_task_output_word_pointer{};
     Id mesh_compute_output_block_pointer{};
     Id mesh_compute_output_word_pointer{};
     Id mesh_first_block_pointer{};    // (a PhysicalStorageBuffer pointer to a block of one u32, and to its member)
     Id mesh_first_member_pointer{};
+    Id mesh_task_child_id{};
+    Id mesh_task_child_valid{};
     u32 texture_rescaling_index{};
     u32 image_rescaling_index{};
 
