@@ -68,6 +68,15 @@ checks = {
         "compute mesh fallback: 64-bit physical storage addresses are unavailable" in SHADER
         and "task compute fallback: 64-bit physical storage addresses are unavailable" in SHADER
     ),
+    "emulated task subgroup checks use compute support": (
+        "queried_stage == Stage::Task && runtime_info.task_compute_emulation" in
+        (ROOT / "gpu/vk/eden/shader_recompiler/backend/spirv/spirv_emit_context.h").read_text(encoding="utf-8")
+        and "profile.SupportsSubgroupStage(Stage::Compute)" in
+        (ROOT / "gpu/vk/eden/shader_recompiler/backend/spirv/spirv_emit_context.h").read_text(encoding="utf-8")
+    ),
+    "warp helper uses stage-aware subgroup support": "ctx.SupportsSubgroupStage(ctx.stage)" in
+        (ROOT / "gpu/vk/eden/shader_recompiler/backend/spirv/emit_spirv_warp.cpp").read_text(encoding="utf-8"),
+    "entrypoint subgroup capabilities use stage-aware support": "ctx.SupportsSubgroupStage(ctx.stage)" in ENTRY,
 }
 
 def flatten_group(x, y, z, dispatch_x, dispatch_y):
