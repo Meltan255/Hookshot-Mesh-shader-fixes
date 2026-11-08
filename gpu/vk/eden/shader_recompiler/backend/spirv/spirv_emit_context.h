@@ -173,7 +173,11 @@ public:
     // Task shaders are emitted as GLCompute in the RX 580 fallback. Query the
     // stage that the generated SPIR-V actually runs on, not native TaskEXT.
     [[nodiscard]] bool SupportsSubgroupStage(Stage queried_stage) const {
-        if (queried_stage == Stage::Task && runtime_info.task_compute_emulation) {
+        const bool task_as_compute =
+            queried_stage == Stage::Task && runtime_info.task_compute_emulation;
+        const bool mesh_as_compute =
+            queried_stage == Stage::Mesh && runtime_info.mesh_compute_emulation;
+        if (task_as_compute || mesh_as_compute) {
             return profile.SupportsSubgroupStage(Stage::Compute);
         }
         return profile.SupportsSubgroupStage(queried_stage);
