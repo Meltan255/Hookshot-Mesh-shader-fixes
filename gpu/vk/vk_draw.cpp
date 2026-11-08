@@ -3986,17 +3986,19 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
             SKIP_HERE();
         }
         mesh_compute_groups = static_cast<uint32_t>(d.groups[0]);
+        const bool multi_draw_indirect = dev.features.multiDrawIndirect == VK_TRUE;
         if (mesh_compute_groups > dev.props.limits.maxComputeWorkGroupCount[0] ||
-            mesh_compute_groups > dev.props.limits.maxDrawIndirectCount) {
-            logf("vk: compute mesh fallback skipped: %u groups exceed Vulkan device limits", mesh_compute_groups);
+            (multi_draw_indirect && mesh_compute_groups > dev.props.limits.maxDrawIndirectCount)) {
+            logf("vk: compute mesh fallback skipped: %u groups exceed Vulkan dispatch/draw limits", mesh_compute_groups);
             SKIP_HERE();
         }
         const uint64_t vertices_per_group =
             static_cast<uint64_t>(p.mesh_compute_max_primitives) * p.mesh_compute_corners;
         if (!vertices_per_group || vertices_per_group > UINT64_MAX / sizeof(MeshComputeVertex) ||
             static_cast<uint64_t>(mesh_compute_groups) >
-                UINT64_MAX / (vertices_per_group * sizeof(MeshComputeVertex))) {
-            logf("vk: compute mesh fallback skipped: output size overflow");
+                UINT64_MAX / (vertices_per_group * sizeof(MeshComputeVertex)) ||
+            static_cast<uint64_t>(mesh_compute_groups) > UINT32_MAX / vertices_per_group) {
+            logf("vk: compute mesh fallback skipped: output size or 32-bit vertex-index range overflow");
             SKIP_HERE();
         }
         mesh_compute_vertex_bytes =
@@ -4205,7 +4207,16 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
         const VkDeviceSize vertex_stride = sizeof(MeshComputeVertex);
         vkCmdBindVertexBuffers2(cmd, 0, 1, &mesh_compute_vertices_buffer, &vertex_offset, &vertex_size,
                                &vertex_stride);
-        vkCmdDrawIndirect(cmd, mesh_compute_commands_buffer, 0, mesh_compute_groups, sizeof(MeshComputeDraw));
+        if (dev.features.multiDrawIndirect) {
+            vkCmdDrawIndirect(cmd, mesh_compute_commands_buffer, 0, mesh_compute_groups, sizeof(MeshComputeDraw));
+        } else {
+            // Vulkan only permits drawCount > 1 when multiDrawIndirect was enabled at device creation.
+            // Keep the same GPU-generated command buffer, but issue one legal indirect draw per mesh workgroup.
+            for (uint32_t group = 0; group < mesh_compute_groups; ++group) {
+                const VkDeviceSize offset = static_cast<VkDeviceSize>(group) * sizeof(MeshComputeDraw);
+                vkCmdDrawIndirect(cmd, mesh_compute_commands_buffer, offset, 1, sizeof(MeshComputeDraw));
+            }
+        }
         last_vb_valid = false;
         st_draws++, pass.draws++;
         return;
