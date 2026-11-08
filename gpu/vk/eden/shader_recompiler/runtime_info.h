@@ -93,6 +93,9 @@ struct RuntimeInfo {
     std::map<IR::Attribute, IR::Attribute> previous_stage_legacy_stores_mapping;
 
     bool mesh_compute_emulation{}; // NVN mesh stage emitted as compute for GPUs without VK_EXT_mesh_shader
+    bool task_compute_emulation{}; // NVN task stage emitted as compute when mesh/task shaders are unavailable
+    bool mesh_task_input_emulation{}; // mesh compute reads the task stage's GPU-written payload records
+    u32 task_compute_groups_per_task{}; // bounded child-workgroup fan-out represented by each task record
     bool convert_depth_mode{};
     bool force_early_z{};
 
