@@ -1948,7 +1948,8 @@ void checkpoint(VkCommandBuffer cmd, const Program& p, char kind) {
 }
 
 void push_constants(VkCommandBuffer cmd, const Program& p, const Targets* at,
-                    uint64_t mesh_compute_commands = 0, uint64_t mesh_compute_vertices = 0) {
+                    uint64_t mesh_compute_commands = 0, uint64_t mesh_compute_vertices = 0,
+                    uint64_t mesh_compute_first = 0) {
     checkpoint(cmd, p, at ? 'd' : 'c');
     if (!p.uses_push) return;   // (most programs read none: a push a draw was ~5% of the replay's commands)
     uint8_t data[kPushSize]{};
@@ -1967,6 +1968,8 @@ void push_constants(VkCommandBuffer cmd, const Program& p, const Targets* at,
                     &mesh_compute_commands, sizeof(mesh_compute_commands));
         std::memcpy(data + Shader::Backend::SPIRV::MESH_COMPUTE_VERTICES_PUSH_OFFSET,
                     &mesh_compute_vertices, sizeof(mesh_compute_vertices));
+        std::memcpy(data + Shader::Backend::SPIRV::MESH_FIRST_PUSH_OFFSET,
+                    &mesh_compute_first, sizeof(mesh_compute_first));
     }
     if (p.uses_render_area && at) {
         // (at the block's own offset, 0, as Eden pushes it: the SPIR-V back end declares RenderAreaInfo at offset 0,
@@ -3893,6 +3896,7 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
     VkBuffer mesh_compute_vertices_buffer = VK_NULL_HANDLE;
     uint64_t mesh_compute_commands_address = 0;
     uint64_t mesh_compute_vertices_address = 0;
+    uint64_t mesh_compute_first_address = 0;
     uint64_t mesh_compute_vertex_bytes = 0;
     uint32_t mesh_compute_groups = 0;
     uint32_t mesh_compute_group_x = 0, mesh_compute_group_y = 0, mesh_compute_group_z = 0;
@@ -4059,7 +4063,15 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
         VkBufferDeviceAddressInfo vertex_address_info{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
         vertex_address_info.buffer = mesh_compute_vertices_buffer;
         mesh_compute_vertices_address = vkGetBufferDeviceAddress(dev.device, &vertex_address_info);
-        if (!mesh_compute_commands_address || !mesh_compute_vertices_address) {
+        if (!mesh_args_ready()) {
+            logf("vk: compute mesh fallback skipped: firstTask address buffer unavailable");
+            SKIP_HERE();
+        }
+        uint32_t first_entry = 0;
+        if (d.first_task != 0) first_entry = mesh_args_take(1);
+        mesh_args_words[first_entry * 4 + 3] = static_cast<uint32_t>(d.first_task);
+        mesh_compute_first_address = mesh_args_address + static_cast<uint64_t>(first_entry) * 16U + 12U;
+        if (!mesh_compute_commands_address || !mesh_compute_vertices_address || !mesh_compute_first_address) {
             logf("vk: compute mesh output buffers have no device address");
             SKIP_HERE();
         }
@@ -4093,7 +4105,7 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
         full_barrier(cmd);
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p.compute_pipeline);
         if (!bind_descriptors(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p)) SKIP_HERE();
-        push_constants(cmd, p, nullptr, mesh_compute_commands_address, mesh_compute_vertices_address);
+        push_constants(cmd, p, nullptr, mesh_compute_commands_address, mesh_compute_vertices_address, mesh_compute_first_address);
         vkCmdDispatch(cmd, mesh_compute_group_x, mesh_compute_group_y, mesh_compute_group_z);
         work_since_barrier = true;
     }
@@ -4146,7 +4158,7 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
     } else {
         st_desc_reused++;
     }
-    push_constants(cmd, p, &at, mesh_compute_commands_address, mesh_compute_vertices_address);
+    push_constants(cmd, p, &at, mesh_compute_commands_address, mesh_compute_vertices_address, mesh_compute_first_address);
     if (watched(p.key)) {   // (RX_VK_WATCH_PROG: the draw's state, 80 lines)
         static std::atomic<int> n{0};
         if (n++ < 80) {
