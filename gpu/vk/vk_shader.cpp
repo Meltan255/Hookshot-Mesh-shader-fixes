@@ -1282,6 +1282,53 @@ uint32_t task_compute_groups_per_task(uint32_t task_threads) {
     return static_cast<uint32_t>(std::min<unsigned long long>(parsed, std::numeric_limits<uint32_t>::max()));
 }
 
+// A fixed-fanout task fallback still executes the mesh shader for child slots that
+// the task culled. Reject external side effects rather than letting those inactive
+// slots write guest memory, storage buffers, images, or atomics. Workgroup-local
+// scratch and the mesh/task payload interface remain valid.
+bool mesh_compute_has_unsupported_side_effects(const Shader::IR::Program& program) {
+    for (const Shader::IR::Block* block : program.blocks) {
+        if (!block) continue;
+        for (const Shader::IR::Inst& inst : block->Instructions()) {
+            if (!inst.MayHaveSideEffects()) continue;
+            switch (inst.GetOpcode()) {
+            case Shader::IR::Opcode::Prologue:
+            case Shader::IR::Opcode::Epilogue:
+            case Shader::IR::Opcode::DemoteToHelperInvocation:
+            case Shader::IR::Opcode::Barrier:
+            case Shader::IR::Opcode::WorkgroupMemoryBarrier:
+            case Shader::IR::Opcode::DeviceMemoryBarrier:
+            case Shader::IR::Opcode::IsbeWriteAttribute:
+            case Shader::IR::Opcode::IsbeWriteMapU8:
+            case Shader::IR::Opcode::IsbeWriteMapU32:
+            case Shader::IR::Opcode::WriteLocal:
+            case Shader::IR::Opcode::WriteSharedU8:
+            case Shader::IR::Opcode::WriteSharedU16:
+            case Shader::IR::Opcode::WriteSharedU32:
+            case Shader::IR::Opcode::WriteSharedU64:
+            case Shader::IR::Opcode::WriteSharedU128:
+            case Shader::IR::Opcode::SharedAtomicIAdd32:
+            case Shader::IR::Opcode::SharedAtomicSMin32:
+            case Shader::IR::Opcode::SharedAtomicUMin32:
+            case Shader::IR::Opcode::SharedAtomicSMax32:
+            case Shader::IR::Opcode::SharedAtomicUMax32:
+            case Shader::IR::Opcode::SharedAtomicInc32:
+            case Shader::IR::Opcode::SharedAtomicDec32:
+            case Shader::IR::Opcode::SharedAtomicAnd32:
+            case Shader::IR::Opcode::SharedAtomicOr32:
+            case Shader::IR::Opcode::SharedAtomicXor32:
+            case Shader::IR::Opcode::SharedAtomicExchange32:
+            case Shader::IR::Opcode::SharedAtomicExchange64:
+            case Shader::IR::Opcode::SharedAtomicExchange32x2:
+                break;
+            default:
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 void translate_mesh_into(Program& p, const NvnState& s, const Code* task, const Code& mesh, const Code* prim,
                          const Code* fsc, const uint8_t color_types[8]) {
     const auto t0 = std::chrono::steady_clock::now();
@@ -1303,6 +1350,11 @@ void translate_mesh_into(Program& p, const NvnState& s, const Code* task, const 
             env.set_mesh(mesh_regs, nullptr);
             task_t = translate(env, true, true);
             dump_ir(p, "task", task_t->program, task->key);
+            if (!dev.mesh_shader &&
+                mesh_compute_has_unsupported_side_effects(task_t->program)) {
+                throw Shader::NotImplementedException(
+                    "task compute fallback: task stage contains non-workgroup external side effects");
+            }
             Shader::RuntimeInfo rt{};
             rt.previous_stage_stores.mask.set();
             const bool task_compute = !dev.mesh_shader;
@@ -1343,6 +1395,11 @@ void translate_mesh_into(Program& p, const NvnState& s, const Code* task, const 
         menv.set_mesh(mesh_regs, prim ? prim->sph : nullptr);
         auto mesh_t = translate(menv, true, true);
         dump_ir(p, "mesh", mesh_t->program, mesh.key);
+        if (!dev.mesh_shader &&
+            mesh_compute_has_unsupported_side_effects(mesh_t->program)) {
+            throw Shader::NotImplementedException(
+                "compute mesh fallback: mesh stage contains external side effects unsafe for over-dispatched culled children");
+        }
         {
             static std::atomic<int> told{0};
             if (told++ < 400) {
@@ -1357,6 +1414,10 @@ void translate_mesh_into(Program& p, const NvnState& s, const Code* task, const 
             }
         }
         int questions = menv.texture_questions;
+        if (!dev.mesh_shader && !profile().support_int64) {
+            throw Shader::NotImplementedException(
+                "compute mesh fallback: 64-bit physical storage addresses are unavailable");
+        }
         if (!dev.mesh_shader &&
             (mesh_t->program.workgroup_size[0] == 0 ||
              mesh_t->program.workgroup_size[0] > dev.props.limits.maxComputeWorkGroupSize[0] ||
