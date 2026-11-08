@@ -203,7 +203,23 @@ Id EmitIsbeRead(EmitContext& ctx, Id address) {
     }
     const Id index{ctx.OpShiftRightLogical(ctx.U32[1], address, ctx.Const(2U))};
     const Id word{ctx.OpLoad(ctx.U32[1], PayloadWord(ctx, index))};
-    return ctx.OpSelect(ctx.U32[1], ctx.OpIEqual(ctx.U1, address, ctx.u32_zero_value), workgroup,
+    Id shader_workgroup = workgroup;
+    if (ctx.runtime_info.mesh_compute_emulation && ctx.wants_mesh_first) {
+        // The compute dispatch starts at local group zero, but NVN's
+        // firstTask is part of the mesh shader's guest-visible WorkgroupId.
+        // Keep this offset out of MeshComputeEpilogue's output-buffer index.
+        const Id first_address{ctx.OpLoad(
+            ctx.U64, ctx.OpAccessChain(ctx.TypePointer(spv::StorageClass::PushConstant, ctx.U64),
+                                       ctx.rescaling_push_constants,
+                                       ctx.Const(ctx.mesh_first_member_index)))};
+        const Id first_member{ctx.OpAccessChain(
+            ctx.mesh_first_member_pointer,
+            ctx.OpConvertUToPtr(ctx.mesh_first_block_pointer, first_address),
+            ctx.Const(0U))};
+        const Id first{ctx.OpLoad(ctx.U32[1], first_member, spv::MemoryAccessMask::Aligned, 4U)};
+        shader_workgroup = ctx.OpIAdd(ctx.U32[1], workgroup, first);
+    }
+    return ctx.OpSelect(ctx.U32[1], ctx.OpIEqual(ctx.U1, address, ctx.u32_zero_value), shader_workgroup,
                         word);
 }
 
