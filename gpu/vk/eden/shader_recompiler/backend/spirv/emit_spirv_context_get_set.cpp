@@ -558,7 +558,30 @@ Id EmitWorkgroupId(EmitContext& ctx) {
         return ctx.OpCompositeConstruct(ctx.U32[3], ctx.mesh_task_child_id,
                                         ctx.u32_zero_value, ctx.u32_zero_value);
     }
-    return ctx.OpLoad(ctx.U32[3], ctx.workgroup_id);
+    const Id workgroup{ctx.OpLoad(ctx.U32[3], ctx.workgroup_id)};
+    const bool needs_first_task =
+        (ctx.stage == Shader::Stage::Task && ctx.runtime_info.task_compute_emulation) ||
+        (ctx.stage == Shader::Stage::Mesh && ctx.runtime_info.mesh_compute_emulation &&
+         !ctx.runtime_info.mesh_task_input_emulation);
+    if (!needs_first_task || !ctx.wants_mesh_first ||
+        !Sirit::ValidId(ctx.rescaling_push_constants) ||
+        !Sirit::ValidId(ctx.mesh_first_block_pointer) ||
+        !Sirit::ValidId(ctx.mesh_first_member_pointer)) {
+        return workgroup;
+    }
+    const Id first_address{ctx.OpLoad(
+        ctx.U64, ctx.OpAccessChain(ctx.TypePointer(spv::StorageClass::PushConstant, ctx.U64),
+                                   ctx.rescaling_push_constants,
+                                   ctx.Const(ctx.mesh_first_member_index)))};
+    const Id first_member{ctx.OpAccessChain(
+        ctx.mesh_first_member_pointer,
+        ctx.OpConvertUToPtr(ctx.mesh_first_block_pointer, first_address),
+        ctx.Const(0U))};
+    const Id first{ctx.OpLoad(ctx.U32[1], first_member, spv::MemoryAccessMask::Aligned, 4U)};
+    const Id x{ctx.OpIAdd(ctx.U32[1], ctx.OpCompositeExtract(ctx.U32[1], workgroup, 0U), first)};
+    const Id y{ctx.OpCompositeExtract(ctx.U32[1], workgroup, 1U)};
+    const Id z{ctx.OpCompositeExtract(ctx.U32[1], workgroup, 2U)};
+    return ctx.OpCompositeConstruct(ctx.U32[3], x, y, z);
 }
 
 Id EmitLocalInvocationId(EmitContext& ctx) {
