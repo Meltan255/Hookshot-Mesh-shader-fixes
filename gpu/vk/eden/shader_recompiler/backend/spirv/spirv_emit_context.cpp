@@ -506,7 +506,10 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
         // (hookshot) the task draw's first workgroup, read through a pushed device address.
         wants_mesh_first = true;
         wants_mesh_task_output = runtime_info.task_compute_emulation;
-        if (getenv("RX_VK_FOLLOW_MESH") && !getenv("RX_VK_NO_FOLLOW") && program.info.uses_global_memory) {
+        // This push-constant block is declared before DefineGlobalMemoryFunctions.
+        // Reserve the page-table member up front when the task shader follows guest
+        // pointers, or the later physical-pointer lowering would see a missing field.
+        if (program.info.uses_global_memory && !getenv("RX_VK_NO_FOLLOW")) {
             wants_guest_pages = true;
         }
         AddCapability(spv::Capability::PhysicalStorageBufferAddresses);
