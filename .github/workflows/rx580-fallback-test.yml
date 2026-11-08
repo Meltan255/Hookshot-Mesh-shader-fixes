@@ -155,9 +155,10 @@ jobs:
           This is an experimental partial fallback, not a complete mesh-shader replacement.
           Only direct one-dimensional task/mesh dispatches are accepted; indirect task/mesh
           dispatches, multidimensional task grids and unsupported mesh output built-ins are
-          skipped. Mesh shaders with external memory, storage-buffer, image or atomic
-          side effects are rejected because the bounded fan-out can execute culled child slots.
-          Task-stage guest writes remain allowed because each task workgroup runs once.
+          skipped. For task+mesh draws, mesh shaders with external memory, storage-buffer,
+          image or atomic side effects are rejected because the bounded fan-out can execute
+          culled child slots. Task-stage guest writes remain allowed because each task group
+          runs once; no-task mesh draws do not use the fixed-fan-out restriction.
           Shader code still runs for those empty slots, so this is not identical to native
           variable-size dispatch. Some geometry or effects may remain missing. A successful
           Windows compile does not prove correct rendering; actual RX 580 testing is required.
@@ -205,7 +206,7 @@ jobs:
 
             This release contains the Builder application and its full tools folder. It does not contain a game, game dump, keys, generated game executable or saves.
 
-            This experimental build keeps Vulkan active when VK_EXT_mesh_shader is unavailable and attempts compute-to-vertex emulation for eligible direct one-dimensional mesh draws, with or without a task stage. The task path stores emitted-child counts and shared payload in a GPU buffer, then dispatches a bounded number of mesh compute workgroups and emits generated vertices plus indirect draws. RX_VK_TASK_CAP sets the child-slot cap (default: task workgroup X size). Only direct 1D task/mesh draws are accepted; indirect draws and unsupported mesh outputs are skipped. Mesh shaders with external memory, storage-buffer, image or atomic side effects are rejected to protect over-dispatched empty child slots; task-stage guest writes remain allowed because each task workgroup runs once. Empty child slots still execute shader code, so behavior is not identical to native variable-size dispatch. RX_VK_FALLBACK_NO_MESH must be left unset; setting it bypasses Vulkan and hands off to WebGPU. Windows compile passed; RX 580 gameplay testing remains required.
+            This experimental build keeps Vulkan active when VK_EXT_mesh_shader is unavailable and attempts compute-to-vertex emulation for eligible direct one-dimensional mesh draws, with or without a task stage. The task path stores emitted-child counts and shared payload in a GPU buffer, then dispatches a bounded number of mesh compute workgroups and emits generated vertices plus indirect draws. RX_VK_TASK_CAP sets the child-slot cap (default: task workgroup X size). Only direct 1D task/mesh draws are accepted; indirect draws and unsupported mesh outputs are skipped. For task+mesh draws, mesh shaders with external memory, storage-buffer, image or atomic side effects are rejected to protect over-dispatched empty child slots. Task-stage guest writes remain allowed because each task workgroup runs once; no-task mesh draws do not use this fixed-fanout restriction. Empty child slots still execute shader code, so behavior is not identical to native variable-size dispatch. RX_VK_FALLBACK_NO_MESH must be left unset; setting it bypasses Vulkan and hands off to WebGPU. Windows compile passed; RX 580 gameplay testing remains required.
           prerelease: true
           draft: false
           make_latest: false
