@@ -263,6 +263,7 @@ public:
     std::vector<ImageDefinition> images;
 
     Id workgroup_id{};
+    Id num_workgroups{};   // (RX 580 mesh compute fallback: flatten a 3D dispatch into a unique output slot)
     Id local_invocation_id{};
     Id invocation_id{};
     Id patch_vertices_in{};
@@ -309,6 +310,12 @@ public:
     Id probe_log{};   // (EvilOOT, RX_VK_BLOCK_PROBE: the miss log's U32 storage buffer, per-block entry counters at word 128+)
     u32 mesh_first_member_index{};    // (hookshot: MESH_FIRST_PUSH_OFFSET's member, task programs)
     bool wants_mesh_first{};
+    bool wants_mesh_compute_output{};
+    u32 mesh_compute_commands_member_index{};
+    u32 mesh_compute_vertices_member_index{};
+    Id mesh_compute_push_u64{};
+    Id mesh_compute_output_block_pointer{};
+    Id mesh_compute_output_word_pointer{};
     Id mesh_first_block_pointer{};    // (a PhysicalStorageBuffer pointer to a block of one u32, and to its member)
     Id mesh_first_member_pointer{};
     u32 texture_rescaling_index{};

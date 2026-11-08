@@ -279,6 +279,18 @@ bool create_device() {
     }
     mesh.multiviewMeshShader = mesh.primitiveFragmentShadingRateMeshShader = VK_FALSE;   // (not used)
     dev.mesh_shader = dev.mesh_shader && mesh.meshShader && mesh.taskShader;
+    // RX_VK_FALLBACK_NO_MESH belonged to the earlier WebGPU hand-off test. It is intentionally
+    // ignored now: on devices without VK_EXT_mesh_shader, eligible no-task mesh draws are
+    // translated to compute and rendered with a conventional vertex pipeline.
+    if (!dev.mesh_shader && getenv("RX_VK_FALLBACK_NO_MESH")) {
+        logf("vk: RX_VK_FALLBACK_NO_MESH is obsolete and ignored; attempting the Vulkan compute mesh fallback");
+    }
+    // Explicit escape hatch for comparing against the previous WebGPU hand-off experiment.
+    const char* force_webgpu = getenv("RX_VK_FORCE_WEBGPU");
+    if (!dev.mesh_shader && force_webgpu && std::strcmp(force_webgpu, "0") != 0) {
+        logf("vk: RX_VK_FORCE_WEBGPU: handing off to WebGPU by request");
+        return false;
+    }
     if (robust) logf("vk: robust buffer access %s", robust_ok ? "on" : "not supported");
     f.features.robustBufferAccess = robust_ok ? VK_TRUE : VK_FALSE;   // (off by default: the game's accesses stay in their buffers)
     dev.features = f.features;
@@ -468,7 +480,15 @@ const MkwVkRenderer* mkwvk_init(const MkwVkHost* h) {
         logf("vk: vulkan-1.dll not found");
         return nullptr;
     }
-    if (!create_instance() || !pick_device() || !create_device()) return nullptr;
+    if (!create_instance() || !pick_device()) return nullptr;
+    if (!create_device()) {
+        // create_device can decline a GPU before creating a VkDevice (for the optional no-mesh fallback).
+        // Release the instance before the host starts its WebGPU renderer.
+        if (dev.instance && vkx::vkDestroyInstance) vkx::vkDestroyInstance(dev.instance, nullptr);
+        dev.instance = VK_NULL_HANDLE;
+        dev.physical = VK_NULL_HANDLE;
+        return nullptr;
+    }
     logf("vk: %s, Vulkan %u.%u, driver %#x; mesh shaders %s, host memory import %s, pipeline libraries %s",
          dev.props.deviceName, VK_VERSION_MAJOR(dev.props.apiVersion), VK_VERSION_MINOR(dev.props.apiVersion),
          dev.props.driverVersion, dev.mesh_shader ? "yes" : "no", dev.external_memory_host ? "yes" : "no",

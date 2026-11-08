@@ -24,6 +24,7 @@
 #include <thread>
 
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
+#include "vk_mesh_compute.h"
 
 #include "vk_draw.h"
 #include "vk_dump.h"
@@ -262,6 +263,14 @@ thread_local VkCommandBuffer rec_cmd = VK_NULL_HANDLE;
 thread_local uint64_t rec_value = 0;
 
 // ---- per recording: a descriptor pool and an upload stream (reset when the recording is reused) ----
+struct MeshOutputBuffers {
+    VkBuffer commands = VK_NULL_HANDLE;
+    VmaAllocation commands_alloc = nullptr;
+    uint64_t commands_capacity = 0;
+    VkBuffer vertices = VK_NULL_HANDLE;
+    VmaAllocation vertices_alloc = nullptr;
+    uint64_t vertices_capacity = 0;
+};
 struct RecordingRes {
     VkDescriptorPool pool = VK_NULL_HANDLE;
     std::vector<VkDescriptorPool> extra;   // (pools added when the first ran out)
@@ -270,6 +279,8 @@ struct RecordingRes {
     uint8_t* mapped = nullptr;
     uint64_t used = 0;
     std::unordered_map<const void*, uint64_t> c1_at;   // (c1 of a stage: uploaded once a recording)
+    MeshOutputBuffers mesh_output;   // reusable in this slot; kept until this recording is complete
+    std::vector<MeshOutputBuffers> retired_mesh_outputs; // larger replacements stay alive until slot reuse
 };
 constexpr uint64_t kStream = 24u << 20;   // (a recording's: 24 of them, vk_replay.cpp kRecordings)
 std::deque<RecordingRes> res;   // (a deque: a recording thread keeps its own in place while another is added)
@@ -455,7 +466,7 @@ VkFormat supported_vertex_format(VkFormat f) {
 }
 
 // ---- pipeline layouts and pipelines ----
-constexpr uint32_t kPushSize = Shader::Backend::SPIRV::MESH_FIRST_PUSH_OFFSET + 8;   // (+ the guest page table's address, a task draw's first)
+constexpr uint32_t kPushSize = Shader::Backend::SPIRV::MESH_COMPUTE_VERTICES_PUSH_OFFSET + 8;
 
 void ensure_layout(Program& p) {
     if (p.layout) return;
@@ -494,7 +505,7 @@ void ensure_layout(Program& p) {
     vkCreatePipelineLayout(dev.device, &pi, nullptr, &layout);
     p.push_stages = stages;
     for (const Stage& st : p.stages) p.uses_render_area |= st.info.uses_render_area;
-    p.uses_push = p.uses_render_area;
+    p.uses_push = p.uses_render_area || p.mesh_compute;
     for (const Stage& st : p.stages) p.uses_push |= st.info.uses_rescaling_uniform;
     static const bool follow_graphics = !getenv("RX_VK_FOLLOW_GRAPHICS") || atoi(getenv("RX_VK_FOLLOW_GRAPHICS")) != 0;
     for (const Stage& st : p.stages)   // (the page table; EvilOOT: and graphics stages with RX_VK_FOLLOW_GRAPHICS)
@@ -731,7 +742,7 @@ VkPipeline gpl_part(const Program& p, const NvnState& s, const Targets& at, VkPr
 VkPipeline gpl_link(const Program& p, const NvnState& s, const Targets& at, VkPrimitiveTopology topo) {
     const uint64_t program = mix(p.key, p.variant);
     uint64_t input = (uint64_t)topology_class(topo) + 1;
-    if (!p.mesh) {
+    if (!p.mesh && !p.mesh_compute) {
         const Shader::Info& vs = p.stages[0].info;
         for (int i = 0; i < 16; i++)
             input = mix(input, vs.loads.Generic(i) ? (uint64_t)s.vattr[i] << 8 | (i < s.nvattr) : 0);
@@ -765,11 +776,19 @@ PipeEntry* graphics_pipeline(const Program& p, const NvnState& s, const Targets&
     // (hookshot: and which variant: p.key is the same for all the variants of a program by its textures' types, and a draw of
     // one ran another's shaders under its own descriptors)
     uint64_t key = mix(mix(p.key, p.variant), (uint64_t)topology_class(topo) << 8 | (uint64_t)at.samples);
-    const Shader::Info& vs = p.stages[0].info;
-    if (!p.mesh) {
+    const auto vertex_stage = std::find_if(p.stages.begin(), p.stages.end(),
+        [](const Stage& st) { return st.vk_stage == VK_SHADER_STAGE_VERTEX_BIT; });
+    const Shader::Info& vs = p.mesh_compute && vertex_stage != p.stages.end()
+                                 ? vertex_stage->info
+                                 : p.stages[0].info;
+    if (!p.mesh && !p.mesh_compute) {
         for (int i = 0; i < 16; i++)
             if (vs.loads.Generic(i)) key = mix(key, (uint64_t)s.vattr[i] << 8 | (i < s.nvattr));
         for (int i = 0; i < 16; i++) key = mix(key, (uint64_t)s.vstream[i].divisor);
+    }
+    if (p.mesh_compute) {
+        key = mix(key, p.mesh_compute_corners);
+        for (uint32_t i = 0; i < 32; ++i) key = mix(key, p.mesh_compute_generics.test(i));
     }
     for (int i = 0; i < at.n; i++) {
         key = mix(key, (uint64_t)at.color_format[i]);
@@ -795,7 +814,7 @@ PipeEntry* graphics_pipeline(const Program& p, const NvnState& s, const Targets&
     if (it != pipelines.end()) return mine[key] = it->second.get();
     pcache_init();
     PipeEntry* e = pipelines.emplace(key, std::make_unique<PipeEntry>()).first->second.get();
-    pipeline_note(key, p, s, at, topo);
+    if (!p.mesh_compute) pipeline_note(key, p, s, at, topo);
     static const bool sync = getenv("RX_VK_SYNC_PIPELINES") != nullptr;
     if (sync) {
         e->pipeline = build_graphics(p, s, at, topo);
@@ -803,7 +822,7 @@ PipeEntry* graphics_pipeline(const Program& p, const NvnState& s, const Targets&
         return e;
     }
     // (linked here, from the libraries: the draw goes ahead, and the worker's full build replaces it when it is done)
-    if (gpl_wanted()) {
+    if (gpl_wanted() && !p.mesh_compute) {
         const auto t0 = std::chrono::steady_clock::now();
         const VkPipeline linked = gpl_link(p, s, at, topo);
         st_link_us += std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count();
@@ -833,10 +852,15 @@ PipeEntry* graphics_pipeline(const Program& p, const NvnState& s, const Targets&
 /// part: -1 the whole pipeline, or the graphics pipeline library it stands for: 0 vertex input, 1 pre-rasterization, 2 fragment
 /// shader, 3 fragment output
 VkPipeline build_graphics(const Program& p, const NvnState& s, const Targets& at, VkPrimitiveTopology topo, int part) {
-    const Shader::Info& vs = p.stages[0].info;
+    const auto vertex_stage = std::find_if(p.stages.begin(), p.stages.end(),
+        [](const Stage& st) { return st.vk_stage == VK_SHADER_STAGE_VERTEX_BIT; });
+    const Shader::Info& vs = p.mesh_compute && vertex_stage != p.stages.end()
+                                 ? vertex_stage->info
+                                 : p.stages[0].info;
     const auto t0 = std::chrono::steady_clock::now();
     std::vector<VkPipelineShaderStageCreateInfo> stages;
     for (const Stage& st : p.stages) {
+        if (p.mesh_compute && st.vk_stage == VK_SHADER_STAGE_COMPUTE_BIT) continue;
         VkPipelineShaderStageCreateInfo si{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
         si.stage = st.vk_stage;
         si.module = st.module;
@@ -849,7 +873,18 @@ VkPipeline build_graphics(const Program& p, const NvnState& s, const Targets& at
     std::vector<VkVertexInputAttributeDescription> va;
     bool stream_used[16]{};
     bool zero_used = false;
-    if (!p.mesh)
+    if (p.mesh_compute) {
+        vb.push_back({0, sizeof(MeshComputeVertex), VK_VERTEX_INPUT_RATE_VERTEX});
+        va.push_back({0, 0, VK_FORMAT_R32G32B32A32_SFLOAT,
+                      (uint32_t)offsetof(MeshComputeVertex, position)});
+        uint32_t input_location = 1;
+        for (uint32_t i = 0; i < 32; ++i) {
+            if (!p.mesh_compute_generics.test(i)) continue;
+            const uint32_t offset = (uint32_t)offsetof(MeshComputeVertex, generic) +
+                                    i * 4U * sizeof(float);
+            va.push_back({input_location++, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offset});
+        }
+    } else if (!p.mesh)
         for (uint32_t i = 0; i < 16; i++) {
             if (!vs.loads.Generic(i)) continue;
             const nvn_va_st a = *reinterpret_cast<const nvn_va_st*>(&s.vattr[i]);
@@ -1912,7 +1947,9 @@ void checkpoint(VkCommandBuffer cmd, const Program& p, char kind) {
     vkCmdSetCheckpointNV(cmd, (void*)(uintptr_t)(i + 1));
 }
 
-void push_constants(VkCommandBuffer cmd, const Program& p, const Targets* at) {
+void push_constants(VkCommandBuffer cmd, const Program& p, const Targets* at,
+                    uint64_t mesh_compute_commands = 0, uint64_t mesh_compute_vertices = 0,
+                    uint64_t mesh_compute_first = 0) {
     checkpoint(cmd, p, at ? 'd' : 'c');
     if (!p.uses_push) return;   // (most programs read none: a push a draw was ~5% of the replay's commands)
     uint8_t data[kPushSize]{};
@@ -1925,6 +1962,14 @@ void push_constants(VkCommandBuffer cmd, const Program& p, const Targets* at) {
     if (at && mesh_args_ready()) {   // (a task program's firsts: entry 0's 0 until its draw says otherwise, never address 0)
         const uint64_t firsts = mesh_args_address + 12;
         std::memcpy(data + Shader::Backend::SPIRV::MESH_FIRST_PUSH_OFFSET, &firsts, 8);
+    }
+    if (p.mesh_compute) {
+        std::memcpy(data + Shader::Backend::SPIRV::MESH_COMPUTE_COMMANDS_PUSH_OFFSET,
+                    &mesh_compute_commands, sizeof(mesh_compute_commands));
+        std::memcpy(data + Shader::Backend::SPIRV::MESH_COMPUTE_VERTICES_PUSH_OFFSET,
+                    &mesh_compute_vertices, sizeof(mesh_compute_vertices));
+        std::memcpy(data + Shader::Backend::SPIRV::MESH_FIRST_PUSH_OFFSET,
+                    &mesh_compute_first, sizeof(mesh_compute_first));
     }
     if (p.uses_render_area && at) {
         // (at the block's own offset, 0, as Eden pushes it: the SPIR-V back end declares RenderAreaInfo at offset 0,
@@ -2597,12 +2642,20 @@ void draw_begin_recording(int slot, VkCommandBuffer cmd, uint64_t value) {
     ParLock lk;
     if ((size_t)slot >= res.size()) res.resize((size_t)slot + 1);
     RecordingRes& r = res[slot];
+    // The slot is reused only after its previous submission completed. Retired output
+    // buffers can now be released; the active pair remains available for reuse.
+    for (MeshOutputBuffers& b : r.retired_mesh_outputs) {
+        if (b.commands) destroy_buffer(b.commands, b.commands_alloc);
+        if (b.vertices) destroy_buffer(b.vertices, b.vertices_alloc);
+    }
+    r.retired_mesh_outputs.clear();
     if (!r.pool) {
         r.pool = make_pool();
         void* mapped = nullptr;
         create_buffer(kStream, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
                                    VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-                                   VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                                   VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
+                                   VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
                       true, r.stream, r.stream_alloc, &mapped);
         r.mapped = (uint8_t*)mapped;
     } else {
@@ -3717,7 +3770,8 @@ bool mesh_args_ready() {
     static const bool ok = [] {
         void* mapped = nullptr;
         if (!create_buffer((uint64_t)kMeshArgs * 16,
-                           VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, true,
+                           VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                               VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, true,
                            mesh_args_buffer, mesh_args_alloc, &mapped) || !mapped)
             return false;
         uint32_t* w = (uint32_t*)mapped;
@@ -3835,6 +3889,18 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
     if (exposure_log_on() && cp) exposure_note(s, *cp);
     if (cp->failed) SKIP_HERE();
     Program& p = const_cast<Program&>(*cp);
+    if (p.mesh_compute) {
+        topo = p.mesh_compute_corners == 2 ? VK_PRIMITIVE_TOPOLOGY_LINE_LIST
+                                           : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    }
+    VkBuffer mesh_compute_commands_buffer = VK_NULL_HANDLE;
+    VkBuffer mesh_compute_vertices_buffer = VK_NULL_HANDLE;
+    uint64_t mesh_compute_commands_address = 0;
+    uint64_t mesh_compute_vertices_address = 0;
+    uint64_t mesh_compute_first_address = 0;
+    uint64_t mesh_compute_vertex_bytes = 0;
+    uint32_t mesh_compute_groups = 0;
+    uint32_t mesh_compute_group_x = 0, mesh_compute_group_y = 0, mesh_compute_group_z = 0;
     PipeEntry* pe;
     {
         PROF(PROF_PIPE);
@@ -3916,6 +3982,134 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
     static const bool barrier_every = getenv("RX_VK_BARRIER_EVERY_DRAW") != nullptr;   // (an experiment: a pass each)
     if (barrier_every) end_pass(cmd);
     const uint16_t writes = draw_hazards(cmd, p, s, at);
+    if (p.mesh_compute) {
+        if (d.indirect || d.groups[0] <= 0 || d.groups[1] <= 0 || d.groups[2] <= 0 ||
+            static_cast<uint64_t>(d.groups[0]) > UINT32_MAX ||
+            static_cast<uint64_t>(d.groups[1]) > UINT32_MAX ||
+            static_cast<uint64_t>(d.groups[2]) > UINT32_MAX ||
+            p.mesh_compute_max_primitives == 0 || p.mesh_compute_corners < 2) {
+            static std::atomic<int> unsupported{0};
+            if (unsupported++ < 24) {
+                logf("vk: compute mesh fallback skipped: unsupported indirect, empty or invalid workgroup grid");
+            }
+            SKIP_HERE();
+        }
+        mesh_compute_group_x = static_cast<uint32_t>(d.groups[0]);
+        mesh_compute_group_y = static_cast<uint32_t>(d.groups[1]);
+        mesh_compute_group_z = static_cast<uint32_t>(d.groups[2]);
+        const uint64_t xy_groups = static_cast<uint64_t>(mesh_compute_group_x) * mesh_compute_group_y;
+        if (xy_groups > UINT32_MAX / mesh_compute_group_z) {
+            logf("vk: compute mesh fallback skipped: 3D workgroup count exceeds 32-bit output indexing");
+            SKIP_HERE();
+        }
+        mesh_compute_groups = static_cast<uint32_t>(xy_groups * mesh_compute_group_z);
+        const bool multi_draw_indirect = dev.features.multiDrawIndirect == VK_TRUE;
+        if (mesh_compute_group_x > dev.props.limits.maxComputeWorkGroupCount[0] ||
+            mesh_compute_group_y > dev.props.limits.maxComputeWorkGroupCount[1] ||
+            mesh_compute_group_z > dev.props.limits.maxComputeWorkGroupCount[2] ||
+            (multi_draw_indirect && mesh_compute_groups > dev.props.limits.maxDrawIndirectCount)) {
+            logf("vk: compute mesh fallback skipped: grid %ux%ux%u (%u total) exceeds Vulkan dispatch/draw limits",
+                 mesh_compute_group_x, mesh_compute_group_y, mesh_compute_group_z, mesh_compute_groups);
+            SKIP_HERE();
+        }
+        const uint64_t vertices_per_group =
+            static_cast<uint64_t>(p.mesh_compute_max_primitives) * p.mesh_compute_corners;
+        if (!vertices_per_group || vertices_per_group > UINT64_MAX / sizeof(MeshComputeVertex) ||
+            static_cast<uint64_t>(mesh_compute_groups) >
+                UINT64_MAX / (vertices_per_group * sizeof(MeshComputeVertex)) ||
+            static_cast<uint64_t>(mesh_compute_groups) > UINT32_MAX / vertices_per_group) {
+            logf("vk: compute mesh fallback skipped: output size or 32-bit vertex-index range overflow");
+            SKIP_HERE();
+        }
+        mesh_compute_vertex_bytes =
+            static_cast<uint64_t>(mesh_compute_groups) * vertices_per_group * sizeof(MeshComputeVertex);
+        const uint64_t command_bytes = static_cast<uint64_t>(mesh_compute_groups) * sizeof(MeshComputeDraw);
+        if (!cur) {
+            logf("vk: compute mesh fallback skipped: no active recording");
+            SKIP_HERE();
+        }
+        if (!cur->mesh_output.commands || cur->mesh_output.commands_capacity < command_bytes ||
+            !cur->mesh_output.vertices || cur->mesh_output.vertices_capacity < mesh_compute_vertex_bytes) {
+            MeshOutputBuffers replacement{};
+            const VkBufferUsageFlags command_usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+            const VkBufferUsageFlags vertex_usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+            if (!create_device_buffer(command_bytes, command_usage, replacement.commands,
+                                      replacement.commands_alloc)) {
+                logf("vk: could not allocate %llu bytes for compute mesh indirect commands",
+                     static_cast<unsigned long long>(command_bytes));
+                SKIP_HERE();
+            }
+            if (!create_device_buffer(mesh_compute_vertex_bytes, vertex_usage, replacement.vertices,
+                                      replacement.vertices_alloc)) {
+                destroy_buffer(replacement.commands, replacement.commands_alloc);
+                logf("vk: could not allocate %llu bytes for compute mesh vertices",
+                     static_cast<unsigned long long>(mesh_compute_vertex_bytes));
+                SKIP_HERE();
+            }
+            replacement.commands_capacity = command_bytes;
+            replacement.vertices_capacity = mesh_compute_vertex_bytes;
+            if (cur->mesh_output.commands || cur->mesh_output.vertices)
+                cur->retired_mesh_outputs.push_back(cur->mesh_output);
+            cur->mesh_output = replacement;
+        }
+        mesh_compute_commands_buffer = cur->mesh_output.commands;
+        mesh_compute_vertices_buffer = cur->mesh_output.vertices;
+
+        VkBufferDeviceAddressInfo command_address_info{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
+        command_address_info.buffer = mesh_compute_commands_buffer;
+        mesh_compute_commands_address = vkGetBufferDeviceAddress(dev.device, &command_address_info);
+        VkBufferDeviceAddressInfo vertex_address_info{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
+        vertex_address_info.buffer = mesh_compute_vertices_buffer;
+        mesh_compute_vertices_address = vkGetBufferDeviceAddress(dev.device, &vertex_address_info);
+        if (!mesh_args_ready()) {
+            logf("vk: compute mesh fallback skipped: firstTask address buffer unavailable");
+            SKIP_HERE();
+        }
+        uint32_t first_entry = 0;
+        if (d.first_task != 0) first_entry = mesh_args_take(1);
+        mesh_args_words[first_entry * 4 + 3] = static_cast<uint32_t>(d.first_task);
+        mesh_compute_first_address = mesh_args_address + static_cast<uint64_t>(first_entry) * 16U + 12U;
+        if (!mesh_compute_commands_address || !mesh_compute_vertices_address || !mesh_compute_first_address) {
+            logf("vk: compute mesh output buffers have no device address");
+            SKIP_HERE();
+        }
+
+        {
+            ParLock mesh_pipeline_lock(!p.compute_pipeline);
+            if (!p.compute_pipeline) {
+                pcache_init();
+                VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+                ci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+                ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+                ci.stage.module = p.stages.front().module;
+                ci.stage.pName = "main";
+                pin_subgroup(ci.stage, p.workgroup[0]);
+                ci.layout = p.layout;
+                const VkResult made = guarded_compute(pcache, &ci, &p.compute_pipeline);
+                if (made != VK_SUCCESS || !p.compute_pipeline) {
+                    logf("vk: compute mesh pipeline for %016llx was not created (%d)",
+                         static_cast<unsigned long long>(p.key), static_cast<int>(made));
+                    p.compute_pipeline = VK_NULL_HANDLE;
+                    SKIP_HERE();
+                }
+                pcache_built_since_save++;
+            }
+        }
+        end_pass(cmd);
+        full_barrier(cmd);
+        // Undefined generic components must read as zero; clear the output before the
+        // mesh compute stage writes the components present in this program.
+        vkCmdFillBuffer(cmd, mesh_compute_vertices_buffer, 0, mesh_compute_vertex_bytes, 0);
+        full_barrier(cmd);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p.compute_pipeline);
+        if (!bind_descriptors(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p)) SKIP_HERE();
+        push_constants(cmd, p, nullptr, mesh_compute_commands_address, mesh_compute_vertices_address, mesh_compute_first_address);
+        vkCmdDispatch(cmd, mesh_compute_group_x, mesh_compute_group_y, mesh_compute_group_z);
+        work_since_barrier = true;
+    }
     BufferRef mesh_args{};
     uint32_t mesh_args_at = 0;
     // (RX_VK_MESH_ARGS=1: rewritten {count, 1, 1, first}. Off: it did not bring the canopies back, and it ends the pass at each draw)
@@ -3965,7 +4159,7 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
     } else {
         st_desc_reused++;
     }
-    push_constants(cmd, p, &at);
+    push_constants(cmd, p, &at, mesh_compute_commands_address, mesh_compute_vertices_address, mesh_compute_first_address);
     if (watched(p.key)) {   // (RX_VK_WATCH_PROG: the draw's state, 80 lines)
         static std::atomic<int> n{0};
         if (n++ < 80) {
@@ -3983,7 +4177,7 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
             logf("%s", line);
         }
     }
-    dynamic_state(cmd, s, at, topo, d.mesh);
+    dynamic_state(cmd, s, at, topo, p.mesh);
     if (trace_tex_hit && texture_frame_no() % 30 == 0) {
         static std::atomic<int> told{0};
         if (told++ < 600) {
@@ -4034,6 +4228,26 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
         // the culling chain then measured as broken)
         static const bool gpu_dump_on = getenv("RX_VK_GPU_DUMP") != nullptr;
         if (stats_query.cmd && gpu_dump_on) stats_query.state = &s, stats_query.prog = p.key;
+    }
+    if (p.mesh_compute) {
+        const VkDeviceSize vertex_offset = 0;
+        const VkDeviceSize vertex_size = mesh_compute_vertex_bytes;
+        const VkDeviceSize vertex_stride = sizeof(MeshComputeVertex);
+        vkCmdBindVertexBuffers2(cmd, 0, 1, &mesh_compute_vertices_buffer, &vertex_offset, &vertex_size,
+                               &vertex_stride);
+        if (dev.features.multiDrawIndirect) {
+            vkCmdDrawIndirect(cmd, mesh_compute_commands_buffer, 0, mesh_compute_groups, sizeof(MeshComputeDraw));
+        } else {
+            // Vulkan only permits drawCount > 1 when multiDrawIndirect was enabled at device creation.
+            // Keep the same GPU-generated command buffer, but issue one legal indirect draw per mesh workgroup.
+            for (uint32_t group = 0; group < mesh_compute_groups; ++group) {
+                const VkDeviceSize offset = static_cast<VkDeviceSize>(group) * sizeof(MeshComputeDraw);
+                vkCmdDrawIndirect(cmd, mesh_compute_commands_buffer, offset, 1, sizeof(MeshComputeDraw));
+            }
+        }
+        last_vb_valid = false;
+        st_draws++, pass.draws++;
+        return;
     }
     if (d.mesh) {
         {   // (amd-fix, diagnosis) RX_VK_LOG_MESH_PROGS=1: each mesh program's first draw and every 600th, with what its

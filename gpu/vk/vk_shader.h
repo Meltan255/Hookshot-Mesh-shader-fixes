@@ -3,6 +3,7 @@
 
 #include <array>
 #include <atomic>
+#include <bitset>
 #include <functional>
 #include <memory>
 #include <string>
@@ -47,7 +48,12 @@ struct Program {
     VkShaderStageFlags push_stages = 0;
     bool uses_render_area = false;
     bool uses_push = true;   // (a stage reads the push constants: render area or rescaling)
-    bool mesh = false;              // task / mesh stages (VK_EXT_mesh_shader)
+    bool mesh = false;              // native task / mesh pipeline (VK_EXT_mesh_shader)
+    bool mesh_compute = false;      // no-task mesh stage translated to compute + generated vertex shader
+    uint32_t mesh_compute_max_primitives = 0;
+    uint32_t mesh_compute_corners = 3;
+    std::bitset<32> mesh_compute_generics{};
+    VkPipeline mesh_compute_pipeline = VK_NULL_HANDLE;
     // What the translator was told about the bound textures (when it asked: most texture instructions carry their
     // type themselves), by stage and texture descriptor: the variant stands while the textures still answer the same
     struct Answer {
