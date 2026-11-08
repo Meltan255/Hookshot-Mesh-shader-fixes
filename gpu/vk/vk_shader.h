@@ -38,6 +38,7 @@ struct Program {
     std::atomic<bool> ready{false};   // translated (graphics programs are translated on a worker: vk_jobs.h)
     std::vector<Stage> stages;
     std::array<uint32_t, 3> workgroup{1, 1, 1};
+    std::array<uint32_t, 3> task_workgroup{1, 1, 1};
     uint32_t shared_memory = 0;
     // made by vk_pipeline.cpp at first use
     VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
@@ -49,11 +50,15 @@ struct Program {
     bool uses_render_area = false;
     bool uses_push = true;   // (a stage reads the push constants: render area or rescaling)
     bool mesh = false;              // native task / mesh pipeline (VK_EXT_mesh_shader)
-    bool mesh_compute = false;      // no-task mesh stage translated to compute + generated vertex shader
+    bool mesh_compute = false;      // mesh stage translated to compute + generated vertex shader
+    bool task_compute = false;      // task stage translated to compute, with payload records for mesh compute
+    uint32_t task_compute_groups_per_task = 0;
+    uint32_t task_compute_payload_words = 0;
     uint32_t mesh_compute_max_primitives = 0;
     uint32_t mesh_compute_corners = 3;
     std::bitset<32> mesh_compute_generics{};
     VkPipeline mesh_compute_pipeline = VK_NULL_HANDLE;
+    VkPipeline task_compute_pipeline = VK_NULL_HANDLE;
     // What the translator was told about the bound textures (when it asked: most texture instructions carry their
     // type themselves), by stage and texture descriptor: the variant stands while the textures still answer the same
     struct Answer {
