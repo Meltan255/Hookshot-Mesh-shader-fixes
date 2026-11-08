@@ -131,7 +131,7 @@ void TaskEpilogue(EmitContext& ctx) {
     // task payload. Native Vulkan passes that payload directly to every child mesh
     // workgroup. The compute fallback writes one bounded record per task workgroup:
     // [emitted child count][payload words...]. The following mesh dispatch reads it.
-    const u32 max_children = ctx.runtime_info.task_compute_groups_per_task
+    const u32 max_children = ctx.runtime_info.task_compute_emulation
                                  ? ctx.runtime_info.task_compute_groups_per_task
                                  : task_cap(ctx.mesh_threads);
     const Id count{ctx.OpUMin(ctx.U32[1], ctx.OpLoad(ctx.U32[1], PayloadWord(ctx, ctx.Const(1U))),
