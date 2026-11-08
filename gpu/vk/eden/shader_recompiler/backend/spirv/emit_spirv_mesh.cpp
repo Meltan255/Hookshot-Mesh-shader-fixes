@@ -138,9 +138,8 @@ void TaskEpilogue(EmitContext& ctx) {
                               ctx.Const(max_children))};
     if (ctx.runtime_info.task_compute_emulation) {
         const Id workgroup{ctx.OpCompositeExtract(ctx.U32[1], ctx.OpLoad(ctx.U32[3], ctx.workgroup_id), 0U)};
-        const Id group64{ctx.OpUConvert(ctx.U64, workgroup)};
-        const Id stride64{ctx.Constant(ctx.U64, static_cast<u64>(ctx.mesh_info.payload_words) + 1U)};
-        const Id base{ctx.OpIMul(ctx.U64, group64, stride64)};
+        const Id stride{ctx.Const(ctx.mesh_info.payload_words + 1U)};
+        const Id base{ctx.OpIMul(ctx.U32[1], workgroup, stride)};
         const Id output{MeshTaskOutputAddress(ctx)};
         const Id invocation{LocalInvocation(ctx)};
         If(ctx, ctx.OpIEqual(ctx.U1, invocation, ctx.u32_zero_value), [&] {
@@ -150,10 +149,8 @@ void TaskEpilogue(EmitContext& ctx) {
             const Id word{ctx.OpIAdd(ctx.U32[1], invocation, ctx.Const(first))};
             If(ctx, ctx.OpULessThan(ctx.U1, word, ctx.Const(ctx.mesh_info.payload_words)), [&] {
                 const Id value{ctx.OpLoad(ctx.U32[1], PayloadWord(ctx, word))};
-                const Id word64{ctx.OpUConvert(ctx.U64, word)};
-                const Id one64{ctx.Constant(ctx.U64, u64{1})};
-                const Id destination{ctx.OpIAdd(ctx.U64, base,
-                    ctx.OpIAdd(ctx.U64, one64, word64))};
+                const Id destination{ctx.OpIAdd(ctx.U32[1], base,
+                    ctx.OpIAdd(ctx.U32[1], ctx.Const(1U), word))};
                 ctx.OpStore(MeshTaskOutputWord(ctx, output, destination), value);
             });
         }
@@ -315,19 +312,17 @@ void EmitMeshPrologue(EmitContext& ctx) {
         const Id cap{ctx.Const(ctx.runtime_info.task_compute_groups_per_task)};
         ctx.mesh_task_child_id = ctx.OpUMod(ctx.U32[1], workgroup, cap);
         const Id task_group{ctx.OpUDiv(ctx.U32[1], workgroup, cap)};
-        const Id task_group64{ctx.OpUConvert(ctx.U64, task_group)};
-        const Id stride64{ctx.Constant(ctx.U64, static_cast<u64>(ctx.mesh_info.payload_words) + 1U)};
-        const Id base{ctx.OpIMul(ctx.U64, task_group64, stride64)};
+        const Id stride{ctx.Const(ctx.mesh_info.payload_words + 1U)};
+        const Id base{ctx.OpIMul(ctx.U32[1], task_group, stride)};
         const Id output{MeshTaskOutputAddress(ctx)};
         const Id emitted{ctx.OpLoad(ctx.U32[1], MeshTaskOutputWord(ctx, output, base))};
         ctx.mesh_task_child_valid = ctx.OpULessThan(ctx.U1, ctx.mesh_task_child_id, emitted);
         const Id invocation{LocalInvocation(ctx)};
-        const Id one64{ctx.Constant(ctx.U64, u64{1})};
         for (u32 first = 0; first < ctx.mesh_info.payload_words; first += ctx.mesh_threads) {
             const Id word{ctx.OpIAdd(ctx.U32[1], invocation, ctx.Const(first))};
             If(ctx, ctx.OpULessThan(ctx.U1, word, ctx.Const(ctx.mesh_info.payload_words)), [&] {
-                const Id word64{ctx.OpUConvert(ctx.U64, word)};
-                const Id source{ctx.OpIAdd(ctx.U64, base, ctx.OpIAdd(ctx.U64, one64, word64))};
+                const Id source{ctx.OpIAdd(ctx.U32[1], base,
+                    ctx.OpIAdd(ctx.U32[1], ctx.Const(1U), word))};
                 const Id value{ctx.OpLoad(ctx.U32[1], MeshTaskOutputWord(ctx, output, source))};
                 ctx.OpStore(PayloadWord(ctx, word), value);
             });
