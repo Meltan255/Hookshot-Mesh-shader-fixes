@@ -78,8 +78,10 @@ checks = {
         "compute mesh fallback: 64-bit physical storage addresses are unavailable" in SHADER
         and "task compute fallback: 64-bit physical storage addresses are unavailable" in SHADER
     ),
-    "emulated task subgroup checks use compute support": (
+    "emulated task and mesh subgroup checks use compute support": (
         "queried_stage == Stage::Task && runtime_info.task_compute_emulation" in
+        (ROOT / "gpu/vk/eden/shader_recompiler/backend/spirv/spirv_emit_context.h").read_text(encoding="utf-8")
+        and "queried_stage == Stage::Mesh && runtime_info.mesh_compute_emulation" in
         (ROOT / "gpu/vk/eden/shader_recompiler/backend/spirv/spirv_emit_context.h").read_text(encoding="utf-8")
         and "profile.SupportsSubgroupStage(Stage::Compute)" in
         (ROOT / "gpu/vk/eden/shader_recompiler/backend/spirv/spirv_emit_context.h").read_text(encoding="utf-8")
