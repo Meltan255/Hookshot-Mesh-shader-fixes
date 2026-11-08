@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - research/rx580-compute-mesh-fallback
+      - research/rx580-task-compute-fallback
     paths:
       - gpu/**
       - host/**
