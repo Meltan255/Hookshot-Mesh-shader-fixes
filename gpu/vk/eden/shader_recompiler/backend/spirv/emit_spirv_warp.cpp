@@ -15,7 +15,7 @@ Id SubgroupScope(EmitContext& ctx) {
 }
 
 bool StageSupportsSubgroups(EmitContext& ctx) {
-    return ctx.profile.SupportsSubgroupStage(ctx.stage);
+    return ctx.SupportsSubgroupStage(ctx.stage);
 }
 
 Id GetThreadId(EmitContext& ctx) {
@@ -373,7 +373,7 @@ void DefineSoftwareMatrixFunction(EmitContext& ctx) {
         constexpr bool variant = true;
         ctx.AddCapability(spv::Capability::GroupNonUniform);
         ctx.AddCapability(spv::Capability::GroupNonUniformShuffle);
-        if (!ctx.profile.SupportsSubgroupStage(ctx.stage) ||
+        if (!ctx.SupportsSubgroupStage(ctx.stage) ||
             ctx.profile.has_broken_spirv_subgroup_shuffle)
             throw NotImplementedException("Software HMMA requires subgroup shuffle support");
         const Id u32ty = ctx.U32[1], f32ty = ctx.F32[1];
