@@ -3895,6 +3895,7 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
     uint64_t mesh_compute_vertices_address = 0;
     uint64_t mesh_compute_vertex_bytes = 0;
     uint32_t mesh_compute_groups = 0;
+    uint32_t mesh_compute_group_x = 0, mesh_compute_group_y = 0, mesh_compute_group_z = 0;
     PipeEntry* pe;
     {
         PROF(PROF_PIPE);
@@ -3977,19 +3978,33 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
     if (barrier_every) end_pass(cmd);
     const uint16_t writes = draw_hazards(cmd, p, s, at);
     if (p.mesh_compute) {
-        if (d.indirect || d.groups[0] <= 0 || d.groups[1] != 1 || d.groups[2] != 1 ||
+        if (d.indirect || d.groups[0] <= 0 || d.groups[1] <= 0 || d.groups[2] <= 0 ||
+            static_cast<uint64_t>(d.groups[0]) > UINT32_MAX ||
+            static_cast<uint64_t>(d.groups[1]) > UINT32_MAX ||
+            static_cast<uint64_t>(d.groups[2]) > UINT32_MAX ||
             p.mesh_compute_max_primitives == 0 || p.mesh_compute_corners < 2) {
             static std::atomic<int> unsupported{0};
             if (unsupported++ < 24) {
-                logf("vk: compute mesh fallback skipped: only direct 1D no-task mesh draws are supported");
+                logf("vk: compute mesh fallback skipped: unsupported indirect, empty or invalid workgroup grid");
             }
             SKIP_HERE();
         }
-        mesh_compute_groups = static_cast<uint32_t>(d.groups[0]);
+        mesh_compute_group_x = static_cast<uint32_t>(d.groups[0]);
+        mesh_compute_group_y = static_cast<uint32_t>(d.groups[1]);
+        mesh_compute_group_z = static_cast<uint32_t>(d.groups[2]);
+        const uint64_t xy_groups = static_cast<uint64_t>(mesh_compute_group_x) * mesh_compute_group_y;
+        if (xy_groups > UINT32_MAX / mesh_compute_group_z) {
+            logf("vk: compute mesh fallback skipped: 3D workgroup count exceeds 32-bit output indexing");
+            SKIP_HERE();
+        }
+        mesh_compute_groups = static_cast<uint32_t>(xy_groups * mesh_compute_group_z);
         const bool multi_draw_indirect = dev.features.multiDrawIndirect == VK_TRUE;
-        if (mesh_compute_groups > dev.props.limits.maxComputeWorkGroupCount[0] ||
+        if (mesh_compute_group_x > dev.props.limits.maxComputeWorkGroupCount[0] ||
+            mesh_compute_group_y > dev.props.limits.maxComputeWorkGroupCount[1] ||
+            mesh_compute_group_z > dev.props.limits.maxComputeWorkGroupCount[2] ||
             (multi_draw_indirect && mesh_compute_groups > dev.props.limits.maxDrawIndirectCount)) {
-            logf("vk: compute mesh fallback skipped: %u groups exceed Vulkan dispatch/draw limits", mesh_compute_groups);
+            logf("vk: compute mesh fallback skipped: grid %ux%ux%u (%u total) exceeds Vulkan dispatch/draw limits",
+                 mesh_compute_group_x, mesh_compute_group_y, mesh_compute_group_z, mesh_compute_groups);
             SKIP_HERE();
         }
         const uint64_t vertices_per_group =
@@ -4079,7 +4094,7 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p.compute_pipeline);
         if (!bind_descriptors(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p)) SKIP_HERE();
         push_constants(cmd, p, nullptr, mesh_compute_commands_address, mesh_compute_vertices_address);
-        vkCmdDispatch(cmd, mesh_compute_groups, 1, 1);
+        vkCmdDispatch(cmd, mesh_compute_group_x, mesh_compute_group_y, mesh_compute_group_z);
         work_since_barrier = true;
     }
     BufferRef mesh_args{};
