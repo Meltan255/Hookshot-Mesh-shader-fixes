@@ -263,6 +263,7 @@ public:
     std::vector<ImageDefinition> images;
 
     Id workgroup_id{};
+    Id num_workgroups{};   // (RX 580 mesh compute fallback: flatten a 3D dispatch into a unique output slot)
     Id local_invocation_id{};
     Id invocation_id{};
     Id patch_vertices_in{};
