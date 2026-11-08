@@ -276,9 +276,14 @@ void DefineEntryPoint(const IR::Program& program, EmitContext& ctx, Id main) {
         execution_model = spv::ExecutionModel::Vertex;
         break;
     case Stage::Task:
-        execution_model = spv::ExecutionModel::TaskEXT;
-        ctx.AddExecutionMode(main, spv::ExecutionMode::LocalSize, program.workgroup_size[0], 1U,
-                             1U);
+        if (ctx.runtime_info.task_compute_emulation) {
+            execution_model = spv::ExecutionModel::GLCompute;
+            ctx.AddExecutionMode(main, spv::ExecutionMode::LocalSize, program.workgroup_size[0], 1U, 1U);
+        } else {
+            execution_model = spv::ExecutionModel::TaskEXT;
+            ctx.AddExecutionMode(main, spv::ExecutionMode::LocalSize, program.workgroup_size[0], 1U,
+                                 1U);
+        }
         break;
     case Stage::Mesh:
         if (ctx.runtime_info.mesh_compute_emulation) {
