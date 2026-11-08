@@ -4101,7 +4101,9 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
 
         if (p.task_compute) {
             const uint64_t words_per_task = static_cast<uint64_t>(p.task_compute_payload_words) + 1U;
-            if (words_per_task > UINT64_MAX / sizeof(uint32_t) ||
+            if (words_per_task > UINT32_MAX ||
+                static_cast<uint64_t>(task_compute_groups) > UINT32_MAX / words_per_task ||
+                words_per_task > UINT64_MAX / sizeof(uint32_t) ||
                 static_cast<uint64_t>(task_compute_groups) >
                     UINT64_MAX / (words_per_task * sizeof(uint32_t))) {
                 logf("vk: task compute fallback skipped: payload output size overflow");
