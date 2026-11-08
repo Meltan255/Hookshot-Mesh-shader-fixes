@@ -68,7 +68,8 @@ checks = {
     "task and mesh payload sizes are checked": "task_t->program.mesh.payload_words != mesh_t->program.mesh.payload_words" in SHADER,
     "task output address is pushed": "MESH_TASK_OUTPUT_PUSH_OFFSET" in DRAW and "mesh_task_output_address" in DRAW,
     "external side effects are rejected only on task-overdispatched mesh stage": (
-        "if (!dev.mesh_shader && task_t,\n            mesh_compute_has_unsupported_side_effects(mesh_t->program))" in SHADER
+        "if (!dev.mesh_shader && task_t &&" in SHADER
+        and "mesh_compute_has_unsupported_side_effects(mesh_t->program)" in SHADER
     ),
     "task stage is not rejected for one-per-task guest writes": "mesh_compute_has_unsupported_side_effects(task_t->program)" not in SHADER,
     "task fallback permits only workgroup-local side effects": (
