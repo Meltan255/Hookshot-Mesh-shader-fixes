@@ -500,16 +500,19 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
     DefineCommonConstants();
     DefineInterfaces(program);
     // (RX_VK_MESH_FIRST=1, with RX_VK_MESH_ARGS=1: off, one task program with it hung or ended the game at its first draw)
-    if (stage == Stage::Task && getenv("RX_VK_MESH_FIRST") && profile.unified_descriptor_binding) {
-        // (hookshot) the draw's first task workgroup, read through a pushed address (EmitIsbeRead)
+    if (stage == Stage::Task &&
+        (runtime_info.task_compute_emulation ||
+         (getenv("RX_VK_MESH_FIRST") && profile.unified_descriptor_binding))) {
+        // (hookshot) the task draw's first workgroup, read through a pushed device address.
         wants_mesh_first = true;
+        wants_mesh_task_output = runtime_info.task_compute_emulation;
         if (getenv("RX_VK_FOLLOW_MESH") && !getenv("RX_VK_NO_FOLLOW") && program.info.uses_global_memory) {
-            wants_guest_pages = true;   // (the block is made once: with the page table's member if the stage will want it)
+            wants_guest_pages = true;
         }
         AddCapability(spv::Capability::PhysicalStorageBufferAddresses);
         AddExtension("SPV_KHR_physical_storage_buffer");
         SetMemoryModel(spv::AddressingModel::PhysicalStorageBuffer64, spv::MemoryModel::GLSL450);
-        if (!Sirit::ValidId(draw_index)) {
+        if (!runtime_info.task_compute_emulation && !Sirit::ValidId(draw_index)) {
             draw_index = DefineInput(*this, U32[1], true, spv::BuiltIn::DrawIndex);
         }
         const Id block{TypeStruct(U32[1])};
@@ -517,6 +520,15 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
         MemberDecorate(block, 0, spv::Decoration::Offset, 0U);
         mesh_first_block_pointer = TypePointer(spv::StorageClass::PhysicalStorageBuffer, block);
         mesh_first_member_pointer = TypePointer(spv::StorageClass::PhysicalStorageBuffer, U32[1]);
+        if (runtime_info.task_compute_emulation) {
+            const Id words = TypeRuntimeArray(U32[1]);
+            Decorate(words, spv::Decoration::ArrayStride, 4U);
+            const Id output_block = TypeStruct(words);
+            Decorate(output_block, spv::Decoration::Block);
+            MemberDecorate(output_block, 0, spv::Decoration::Offset, 0U);
+            mesh_task_output_block_pointer = TypePointer(spv::StorageClass::PhysicalStorageBuffer, output_block);
+            mesh_task_output_word_pointer = TypePointer(spv::StorageClass::PhysicalStorageBuffer, U32[1]);
+        }
         DefineRescalingInputPushConstant();
     }
     DefineMesh(program);
@@ -535,7 +547,7 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
     DefineGlobalMemoryFunctions(program.info);
     DefineRescalingInput(program.info);
     DefineRenderArea(program.info);
-    if (wants_mesh_compute_output && !Sirit::ValidId(rescaling_push_constants)) {
+    if ((wants_mesh_compute_output || wants_mesh_task_output) && !Sirit::ValidId(rescaling_push_constants)) {
         DefineRescalingInputPushConstant();
     }
 }
@@ -1016,7 +1028,7 @@ void EmitContext::DefineGlobalMemoryFunctions(const Info& info) {
     // (the culling; a graphics stage with it hung the renderer at a load. RX_VK_NO_FOLLOW: none of it, as before)
     static const bool no_follow{getenv("RX_VK_NO_FOLLOW") != nullptr};
     // (RX_VK_FOLLOW_MESH=1: the task and mesh stages too. Tried for the foliage, which it did not bring back: off)
-    const bool no_mesh{!runtime_info.mesh_compute_emulation && getenv("RX_VK_FOLLOW_MESH") == nullptr};
+    const bool no_mesh{!(runtime_info.mesh_compute_emulation || runtime_info.task_compute_emulation) && getenv("RX_VK_FOLLOW_MESH") == nullptr};
     // (EvilOOT: vertex and fragment stages too, as the fallback only: an access no bound buffer holds read 0 there (Kokiri's
     // pond came out grey, not green). The pointer pass leaves graphics stages as they were, so what was found before still is,
     // and the menus' text stays. Not where the stage has the render area's push block: a stage has one push block.
@@ -1321,7 +1333,7 @@ void EmitContext::DefineRescalingInput(const Info& info) {
 }
 
 void EmitContext::DefineRescalingInputPushConstant() {
-    boost::container::static_vector<Id, 7> members{};
+    boost::container::static_vector<Id, 8> members{};
     u32 member_index{0};
 
     rescaling_textures_type = TypeArray(U32[1], Const(4u));
@@ -1351,6 +1363,10 @@ void EmitContext::DefineRescalingInputPushConstant() {
         mesh_compute_commands_member_index = member_index++;
         members.push_back(U64);
         mesh_compute_vertices_member_index = member_index++;
+    }
+    if (wants_mesh_task_output) {
+        members.push_back(U64);
+        mesh_task_output_member_index = member_index++;
     }
     const Id push_constant_struct{TypeStruct(std::span(members.data(), members.size()))};
     Decorate(push_constant_struct, spv::Decoration::Block);
@@ -1386,6 +1402,12 @@ void EmitContext::DefineRescalingInputPushConstant() {
         MemberDecorate(push_constant_struct, mesh_compute_vertices_member_index, spv::Decoration::Offset,
                        MESH_COMPUTE_VERTICES_PUSH_OFFSET);
         MemberName(push_constant_struct, mesh_compute_vertices_member_index, "mesh_compute_vertices");
+    }
+    if (wants_mesh_task_output) {
+        mesh_task_output_push_u64 = TypePointer(spv::StorageClass::PushConstant, U64);
+        MemberDecorate(push_constant_struct, mesh_task_output_member_index, spv::Decoration::Offset,
+                       MESH_TASK_OUTPUT_PUSH_OFFSET);
+        MemberName(push_constant_struct, mesh_task_output_member_index, "mesh_task_output");
     }
     const Id pointer_type{TypePointer(spv::StorageClass::PushConstant, push_constant_struct)};
     rescaling_push_constants = AddGlobalVariable(pointer_type, spv::StorageClass::PushConstant);
@@ -1754,7 +1776,8 @@ void EmitContext::DefineInputs(const IR::Program& program) {
     const VaryingState loads{info.loads.mask | info.passthrough.mask};
 
     const bool mesh_compute_emulation = stage == Stage::Mesh && runtime_info.mesh_compute_emulation;
-    if (info.uses_workgroup_id || mesh_compute_emulation) {
+    const bool task_compute_emulation = stage == Stage::Task && runtime_info.task_compute_emulation;
+    if (info.uses_workgroup_id || mesh_compute_emulation || task_compute_emulation) {
         workgroup_id = DefineInput(*this, U32[3], false, spv::BuiltIn::WorkgroupId);
     }
     if (mesh_compute_emulation) {
@@ -1954,30 +1977,46 @@ void EmitContext::DefineMesh(const IR::Program& program) {
     if (stage != Stage::Task && stage != Stage::Mesh) {
         return;
     }
-    const bool compute_emulation = stage == Stage::Mesh && runtime_info.mesh_compute_emulation;
+    const bool compute_emulation = (stage == Stage::Task && runtime_info.task_compute_emulation) ||
+                                   (stage == Stage::Mesh && runtime_info.mesh_compute_emulation);
     if (!compute_emulation) {
         AddExtension("SPV_EXT_mesh_shader");
         AddCapability(spv::Capability::MeshShadingEXT);
     } else {
-        wants_mesh_compute_output = true;
-        // A no-task mesh dispatch still observes NVN's firstTask offset. The
-        // generated output buffer must continue to use the local WorkgroupId.
-        wants_mesh_first = true;
         AddCapability(spv::Capability::PhysicalStorageBufferAddresses);
         AddExtension("SPV_KHR_physical_storage_buffer");
         SetMemoryModel(spv::AddressingModel::PhysicalStorageBuffer64, spv::MemoryModel::GLSL450);
-        const Id first_block = TypeStruct(U32[1]);
-        Decorate(first_block, spv::Decoration::Block);
-        MemberDecorate(first_block, 0, spv::Decoration::Offset, 0U);
-        mesh_first_block_pointer = TypePointer(spv::StorageClass::PhysicalStorageBuffer, first_block);
-        mesh_first_member_pointer = TypePointer(spv::StorageClass::PhysicalStorageBuffer, U32[1]);
-        const Id words = TypeRuntimeArray(U32[1]);
-        Decorate(words, spv::Decoration::ArrayStride, 4U);
-        const Id block = TypeStruct(words);
-        Decorate(block, spv::Decoration::Block);
-        MemberDecorate(block, 0, spv::Decoration::Offset, 0U);
-        mesh_compute_output_block_pointer = TypePointer(spv::StorageClass::PhysicalStorageBuffer, block);
-        mesh_compute_output_word_pointer = TypePointer(spv::StorageClass::PhysicalStorageBuffer, U32[1]);
+        if (stage == Stage::Mesh) {
+            wants_mesh_compute_output = true;
+            if (!runtime_info.mesh_task_input_emulation) {
+                // A direct no-task dispatch exposes firstTask in shader WorkgroupId.
+                wants_mesh_first = true;
+                const Id first_block = TypeStruct(U32[1]);
+                Decorate(first_block, spv::Decoration::Block);
+                MemberDecorate(first_block, 0, spv::Decoration::Offset, 0U);
+                mesh_first_block_pointer = TypePointer(spv::StorageClass::PhysicalStorageBuffer, first_block);
+                mesh_first_member_pointer = TypePointer(spv::StorageClass::PhysicalStorageBuffer, U32[1]);
+            }
+            if (runtime_info.mesh_task_input_emulation) {
+                wants_mesh_task_output = true;
+            }
+            const Id words = TypeRuntimeArray(U32[1]);
+            Decorate(words, spv::Decoration::ArrayStride, 4U);
+            const Id block = TypeStruct(words);
+            Decorate(block, spv::Decoration::Block);
+            MemberDecorate(block, 0, spv::Decoration::Offset, 0U);
+            mesh_compute_output_block_pointer = TypePointer(spv::StorageClass::PhysicalStorageBuffer, block);
+            mesh_compute_output_word_pointer = TypePointer(spv::StorageClass::PhysicalStorageBuffer, U32[1]);
+        }
+        if (wants_mesh_task_output && !Sirit::ValidId(mesh_task_output_block_pointer)) {
+            const Id words = TypeRuntimeArray(U32[1]);
+            Decorate(words, spv::Decoration::ArrayStride, 4U);
+            const Id output_block = TypeStruct(words);
+            Decorate(output_block, spv::Decoration::Block);
+            MemberDecorate(output_block, 0, spv::Decoration::Offset, 0U);
+            mesh_task_output_block_pointer = TypePointer(spv::StorageClass::PhysicalStorageBuffer, output_block);
+            mesh_task_output_word_pointer = TypePointer(spv::StorageClass::PhysicalStorageBuffer, U32[1]);
+        }
     }
     mesh_info = program.mesh;
     mesh_threads = program.workgroup_size[0];
