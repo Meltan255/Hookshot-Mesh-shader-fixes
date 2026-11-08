@@ -1956,7 +1956,7 @@ void checkpoint(VkCommandBuffer cmd, const Program& p, char kind) {
 
 void push_constants(VkCommandBuffer cmd, const Program& p, const Targets* at,
                     uint64_t mesh_compute_commands = 0, uint64_t mesh_compute_vertices = 0,
-                    uint64_t mesh_compute_first = 0) {
+                    uint64_t mesh_compute_first = 0, uint64_t mesh_task_output = 0) {
     checkpoint(cmd, p, at ? 'd' : 'c');
     if (!p.uses_push) return;   // (most programs read none: a push a draw was ~5% of the replay's commands)
     uint8_t data[kPushSize]{};
@@ -1977,6 +1977,10 @@ void push_constants(VkCommandBuffer cmd, const Program& p, const Targets* at,
                     &mesh_compute_vertices, sizeof(mesh_compute_vertices));
         std::memcpy(data + Shader::Backend::SPIRV::MESH_FIRST_PUSH_OFFSET,
                     &mesh_compute_first, sizeof(mesh_compute_first));
+    }
+    if (p.task_compute) {
+        std::memcpy(data + Shader::Backend::SPIRV::MESH_TASK_OUTPUT_PUSH_OFFSET,
+                    &mesh_task_output, sizeof(mesh_task_output));
     }
     if (p.uses_render_area && at) {
         // (at the block's own offset, 0, as Eden pushes it: the SPIR-V back end declares RenderAreaInfo at offset 0,
