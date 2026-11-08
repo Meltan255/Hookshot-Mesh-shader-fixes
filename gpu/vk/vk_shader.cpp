@@ -1250,6 +1250,27 @@ std::vector<uint32_t> emit_mesh_compute_vertex_shader(const std::bitset<32>& gen
     return module.Assemble();
 }
 
+bool mesh_compute_has_guest_side_effects(const Shader::IR::Program& program) {
+    // Task fallback allocates the maximum child fan-out and turns culled children
+    // into zero-primitive draws. Their shader body still executes, so reject mesh
+    // shaders with guest-visible writes/atomics rather than replaying those effects
+    // for child slots which the task stage actually culled.
+    for (const Shader::IR::Block* block : program.blocks) {
+        if (!block) continue;
+        for (const Shader::IR::Inst& inst : block->Instructions()) {
+            const std::string_view name = Shader::IR::NameOf(inst.GetOpcode());
+            if (name.starts_with("WriteGlobal") || name.starts_with("WriteStorage") ||
+                name.starts_with("GlobalAtomic") || name.starts_with("StorageAtomic") ||
+                name == "BindlessImageWrite" || name == "BoundImageWrite" || name == "ImageWrite" ||
+                name.starts_with("BindlessImageAtomic") || name.starts_with("BoundImageAtomic") ||
+                name.starts_with("ImageAtomic")) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 uint32_t task_compute_groups_per_task(uint32_t task_threads) {
     if (task_threads == 0) return 1;
     const char* value = std::getenv("RX_VK_TASK_CAP");
@@ -1351,6 +1372,10 @@ void translate_mesh_into(Program& p, const NvnState& s, const Code* task, const 
         if (mrt.mesh_task_input_emulation &&
             task_t->program.mesh.payload_words != mesh_t->program.mesh.payload_words) {
             throw Shader::NotImplementedException("task compute fallback: task and mesh payload sizes differ");
+        }
+        if (mrt.mesh_task_input_emulation && mesh_compute_has_guest_side_effects(mesh_t->program)) {
+            throw Shader::NotImplementedException(
+                "task compute fallback: mesh shader has guest-visible writes or atomics in over-dispatched child slots");
         }
         const std::vector<uint32_t> mspirv = Shader::Backend::SPIRV::EmitSPIRV(profile(), mrt, mesh_t->program, bindings);
         kept.push_back(mspirv);
