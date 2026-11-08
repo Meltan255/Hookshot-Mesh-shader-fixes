@@ -1786,7 +1786,7 @@ void EmitContext::DefineInputs(const IR::Program& program) {
     if (mesh_compute_emulation) {
         num_workgroups = DefineInput(*this, U32[3], false, spv::BuiltIn::NumWorkgroups);
     }
-    if (info.uses_local_invocation_id) {
+    if (info.uses_local_invocation_id || mesh_compute_emulation || task_compute_emulation) {
         local_invocation_id = DefineInput(*this, U32[3], false, spv::BuiltIn::LocalInvocationId);
     }
     if (info.uses_invocation_id) {
