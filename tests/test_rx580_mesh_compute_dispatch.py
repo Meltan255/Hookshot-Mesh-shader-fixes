@@ -47,6 +47,11 @@ checks = {
     "culled child slots emit zero primitives": "ctx.mesh_task_child_valid, raw_count, ctx.u32_zero_value" in EMITTER,
     "task payload words are cleared before task shader execution": "ctx.stage == Stage::Task" in EMITTER and "ctx.OpStore(PayloadWord(ctx, word), ctx.u32_zero_value)" in EMITTER,
     "task payload buffer has storage and device-address usage": "VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT" in DRAW,
+    "task record indexing is bounded to 32 bits": (
+        "task_compute_groups) > UINT32_MAX / words_per_task" in DRAW
+        and "OpIMul(ctx.U32[1], workgroup, stride)" in EMITTER
+        and "OpIMul(ctx.U32[1], task_group, stride)" in EMITTER
+    ),
     "task compute pipeline uses the task stage module": "st.nvn_stage == 6 && st.vk_stage == VK_SHADER_STAGE_COMPUTE_BIT" in DRAW and "p.task_compute_pipeline" in DRAW,
     "mesh compute pipeline uses the mesh stage module": "st.nvn_stage == 7 && st.vk_stage == VK_SHADER_STAGE_COMPUTE_BIT" in DRAW and "p.mesh_compute_pipeline" in DRAW,
     "task dispatch occurs before mesh dispatch with a full barrier": (
