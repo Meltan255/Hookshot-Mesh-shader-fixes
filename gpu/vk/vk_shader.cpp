@@ -1284,6 +1284,16 @@ void translate_mesh_into(Program& p, const NvnState& s, const Code* task, const 
             Shader::RuntimeInfo rt{};
             rt.previous_stage_stores.mask.set();
             const bool task_compute = !dev.mesh_shader;
+            if (task_compute && !profile().support_int64) {
+                throw Shader::NotImplementedException("task compute fallback: 64-bit physical storage addresses are unavailable");
+            }
+            if (task_compute &&
+                (task_t->program.workgroup_size[0] == 0 ||
+                 task_t->program.workgroup_size[0] > dev.props.limits.maxComputeWorkGroupSize[0] ||
+                 task_t->program.workgroup_size[0] > dev.props.limits.maxComputeWorkGroupInvocations ||
+                 task_t->program.mesh.payload_words < 2)) {
+                throw Shader::NotImplementedException("task compute fallback: invalid task workgroup or payload size");
+            }
             const uint32_t task_groups_per_task = task_compute
                 ? task_compute_groups_per_task(task_t->program.workgroup_size[0]) : 0U;
             rt.task_compute_emulation = task_compute;
@@ -1325,6 +1335,12 @@ void translate_mesh_into(Program& p, const NvnState& s, const Code* task, const 
             }
         }
         int questions = menv.texture_questions;
+        if (!dev.mesh_shader &&
+            (mesh_t->program.workgroup_size[0] == 0 ||
+             mesh_t->program.workgroup_size[0] > dev.props.limits.maxComputeWorkGroupSize[0] ||
+             mesh_t->program.workgroup_size[0] > dev.props.limits.maxComputeWorkGroupInvocations)) {
+            throw Shader::NotImplementedException("compute mesh fallback: invalid mesh workgroup size for this device");
+        }
         Shader::RuntimeInfo mrt{};
         if (task_t) mrt.previous_stage_stores = task_t->program.info.stores;
         else mrt.previous_stage_stores.mask.set();
