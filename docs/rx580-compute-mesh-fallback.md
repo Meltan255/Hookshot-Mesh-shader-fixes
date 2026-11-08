@@ -1,6 +1,6 @@
 # RX 580 compatibility: no-task mesh shaders via compute + indirect draws
 
-Status: **experimental task+mesh compute path has been added to the research branch; Windows renderer compilation and RX 580 runtime validation are pending.** No-task mesh draws and direct task+mesh draws are translated to compute, generated vertices and conventional indirect draws. The current NVN replay path maps the verified direct `DrawMeshTasks(first, count)` form to X only and fixes Y/Z to one. Indirect mesh/task draws remain unsupported. This is not a complete task/mesh-shader replacement.
+Status: **experimental task+mesh compute path is pushed; Windows Vulkan renderer compilation and Builder ZIP packaging passed at test 38. RX 580 runtime/visual validation is still pending.** No-task mesh draws and direct task+mesh draws are translated to compute, generated vertices and conventional indirect draws. The current NVN replay path maps the verified direct `DrawMeshTasks(first, count)` form to X only and fixes Y/Z to one. Indirect mesh/task draws remain unsupported. This is not a complete task/mesh-shader replacement.
 
 This note records the RX 580 failure mode and the fallback design. A capability check or environment-variable change cannot make native mesh shaders available on hardware that does not expose `VK_EXT_mesh_shader`.
 
@@ -42,9 +42,9 @@ For a direct one-dimensional task draw, the research branch translates the NVN t
 
 The renderer dispatches task compute first, inserts a compute-write to compute-read barrier, and dispatches mesh compute over a fixed maximum fan-out. The maximum children per task defaults to that task shader's X workgroup size; `RX_VK_TASK_CAP` can lower or raise the bound. Each mesh workgroup maps its linear dispatch slot back to a parent task and child ordinal, copies the parent's payload into workgroup memory, and exposes the child ordinal as the mesh shader's guest-visible `WorkgroupId.x`. Child slots beyond the parent's emitted count write an empty indirect draw.
 
-This preserves GPU-side culling and avoids CPU readback, but it is not yet identical to native variable-size task dispatch: the mesh shader body still runs for over-dispatched empty child slots, even though their output primitive count is forced to zero. Mesh-stage global side effects in those inactive slots therefore remain a semantic risk and require further analysis. Only direct one-dimensional task draws are accepted; indirect task draws and multidimensional task grids are rejected.
+This preserves GPU-side culling and avoids CPU readback, but it is not identical to native variable-size task dispatch: the mesh shader body still runs for over-dispatched empty child slots, even though their output primitive count is forced to zero. To avoid executing unintended external writes from those extra slots, the translator rejects task or mesh programs with external guest-memory, storage-buffer, image-write or atomic side effects. Workgroup-local scratch and the internal mesh payload/output writes remain allowed. This is intentionally conservative and can reject shaders that might otherwise be safe. Only direct one-dimensional task draws are accepted; indirect task draws and multidimensional task grids are rejected.
 
-The task and mesh payload word counts are checked for equality, task fan-out and Vulkan dispatch limits are checked, and the payload records live until the recording slot is safely reused. The implementation is source-complete enough to compile-test, not yet hardware-validated.
+The task and mesh payload word counts are checked for equality, task fan-out and Vulkan dispatch limits are checked, and the payload records live until the recording slot is safely reused. The firstTask offset is applied to the task shader's guest-visible WorkgroupId.x; the mesh shader sees its child ordinal within the parent task. Subgroup capability checks for an emulated task shader use compute-stage support, because the generated SPIR-V executes as GLCompute. The Windows renderer compile passed, but the implementation remains experimental and has not been tested on RX 580 hardware.
 
 ### 2. No-task mesh stage is partially implemented
 
@@ -67,7 +67,7 @@ The compute stage expands each output primitive to a line-list or triangle-list 
 - The current draw path ends the render pass and inserts full barriers around the output clear and compute dispatch before consuming generated vertices and indirect commands. The barrier scopes still need validation on the target AMD driver.
 - Output buffers are owned by the active recording; replaced buffers are retired and released when that recording slot is reused after completion. The growth path must continue to be checked for allocation failures and large draws.
 - The draw path checks 32-bit output indexing, dispatch-axis limits, indirect-draw count limits and allocation failures; unsupported or oversized draws are logged and skipped.
-- Remaining semantic gaps include indirect mesh/task dispatches, mesh-stage side effects from over-dispatched empty child slots, viewport/layer outputs, primitive IDs, point size and clip/cull outputs.
+- Remaining semantic gaps include indirect mesh/task dispatches, performance cost from over-dispatched empty child slots, rejected task/mesh programs with external side effects, viewport/layer outputs, primitive IDs, point size and clip/cull outputs.
 - Validate with scenes that exercise direct no-task draws with nonzero firstTask, task culling, large foliage/grass batches, multi-primitive meshlets and zero-output workgroups.
 
 ## Source areas that need coordinated changes
@@ -79,14 +79,14 @@ The compute stage expands each output primitive to a line-list or triangle-list 
 - `gpu/vk/vk_main.cpp` / `vk_internal.h`: capability selection; native mesh support must remain optional for the fallback.
 - `nx2/build.py`: include any new translator/runtime source in the Vulkan DLL build.
 
-The task+mesh fallback, no-task fallback and dispatch/indexing changes are source changes, not proof of compatibility. The Windows renderer compile check must pass, followed by actual RX 580 testing. The next major correctness work is handling mesh-stage side effects for empty child slots and supporting indirect task/mesh dispatches.
+The task+mesh fallback, no-task fallback and dispatch/indexing changes are source changes, not proof of compatibility. The Windows Vulkan renderer compile and Builder ZIP package passed at test 38; actual RX 580 testing is still required. The next major work is supporting indirect task/mesh dispatches, unsupported mesh outputs and a more exact variable-child execution model.
 
 ## Test plan for the RX 580
 
 A meaningful test build should log a line identifying compute mesh emulation, such as:
 
 ```
-vk: mesh ... using no-task compute fallback
+vk: mesh ... using compute mesh fallback
 ```
 
 The test report should include:
