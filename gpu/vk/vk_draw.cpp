@@ -3910,10 +3910,13 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
     }
     VkBuffer mesh_compute_commands_buffer = VK_NULL_HANDLE;
     VkBuffer mesh_compute_vertices_buffer = VK_NULL_HANDLE;
+    VkBuffer mesh_task_output_buffer = VK_NULL_HANDLE;
     uint64_t mesh_compute_commands_address = 0;
     uint64_t mesh_compute_vertices_address = 0;
     uint64_t mesh_compute_first_address = 0;
+    uint64_t mesh_task_output_address = 0;
     uint64_t mesh_compute_vertex_bytes = 0;
+    uint32_t task_compute_groups = 0;
     uint32_t mesh_compute_groups = 0;
     uint32_t mesh_compute_group_x = 0, mesh_compute_group_y = 0, mesh_compute_group_z = 0;
     PipeEntry* pe;
@@ -3934,8 +3937,6 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
     cur_program = &p;
     if (!record_progs().empty() && std::find(record_progs().begin(), record_progs().end(), p.key) != record_progs().end())
         record_draw(s, p, d, at);
-    // (RX_VK_DUMP_EACH=<key>,...: in a dump, the pass ends after each draw of those programs, so every one of them is
-    // read back on its own)
     struct EachGuard {
         VkCommandBuffer cmd = VK_NULL_HANDLE;
         ~EachGuard() { if (cmd) end_pass(cmd); }
@@ -3953,7 +3954,6 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
                 }
             return v;
         }();
-        // (a key of 1: every draw into a target at least 2048 wide; 2,<width in hex>: every draw into targets that wide)
         if (!each.empty() && dump_on() &&
             (std::find(each.begin(), each.end(), p.key) != each.end() ||
              (each[0] == 1 && at.width >= 2048) || (each[0] == 2 && each.size() > 1 && at.width == each[1])))
@@ -3966,21 +3966,19 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
                  (unsigned long long)p.key, (int)p.stages.size(), at.n, at.width, at.height,
                  (unsigned long long)(at.color[0] ? at.color[0]->gpu : 0), (int)at.color_format[0], (int)topo, d.count);
     }
-    // (the descriptors depend on the program, the bindings, the texture slots and the stream's uniform updates:
-    // when none changed since the last draw, the set it pushed or bound stands)
     const uint64_t reg_gen = registrations_generation(), ub_gen = ub_generation();
-    static const bool no_reuse = getenv("RX_VK_NO_DESC_REUSE") != nullptr;   // (A/B: every draw builds its own)
+    static const bool no_reuse = getenv("RX_VK_NO_DESC_REUSE") != nullptr;
     const bool same_desc = !no_reuse && last_desc_valid && last_desc_prog == &p && last_desc_bind == s.bind_gen &&
                            last_desc_reg == reg_gen && last_desc_ub == ub_gen;
     if (!same_desc) {
         PROF(PROF_DESC);
         trace_tex_hit = nullptr, trace_tex_mask = 0;
-        build_descriptors(s, p);   // (textures first used here are uploaded by the recording's upload command buffer)
+        build_descriptors(s, p);
         static std::string last_logged;
         if (dump_on()) {
             char head[256];
             int hn = snprintf(head, sizeof head, "prog %016llx %ux%u:", (unsigned long long)p.key, at.width, at.height);
-            for (int i = 0; i < at.n && hn < 200; i++)   // (the targets' NVN formats and the views' Vulkan ones)
+            for (int i = 0; i < at.n && hn < 200; i++)
                 if (at.color[i])
                     hn += snprintf(head + hn, sizeof head - hn, " c%d:#%u/n%#x/v%d", i, at.color[i]->id,
                                    s.rt.has_cview[i] && s.rt.cview[i].set_format ? (int)s.rt.cview[i].format
@@ -3994,7 +3992,7 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
     PROF(PROF_CMDS);
     texture_watch_prog(p.key);
     if (!same_desc) gfx_sampled = draw_sampled;
-    static const bool barrier_every = getenv("RX_VK_BARRIER_EVERY_DRAW") != nullptr;   // (an experiment: a pass each)
+    static const bool barrier_every = getenv("RX_VK_BARRIER_EVERY_DRAW") != nullptr;
     if (barrier_every) end_pass(cmd);
     const uint16_t writes = draw_hazards(cmd, p, s, at);
     if (p.mesh_compute) {
@@ -4009,15 +4007,43 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
             }
             SKIP_HERE();
         }
-        mesh_compute_group_x = static_cast<uint32_t>(d.groups[0]);
-        mesh_compute_group_y = static_cast<uint32_t>(d.groups[1]);
-        mesh_compute_group_z = static_cast<uint32_t>(d.groups[2]);
-        const uint64_t xy_groups = static_cast<uint64_t>(mesh_compute_group_x) * mesh_compute_group_y;
-        if (xy_groups > UINT32_MAX / mesh_compute_group_z) {
-            logf("vk: compute mesh fallback skipped: 3D workgroup count exceeds 32-bit output indexing");
-            SKIP_HERE();
+        if (p.task_compute) {
+            // The current NVN direct form supplies a first task and a count. Until an
+            // indirect task argument decoder is implemented, this fallback is direct 1D only.
+            if (d.groups[1] != 1 || d.groups[2] != 1 || p.task_compute_groups_per_task == 0 ||
+                p.task_compute_payload_words < 2 ||
+                p.task_compute_payload_words != p.mesh_compute_payload_words) {
+                logf("vk: task compute fallback skipped: unsupported task grid or mismatched payload layout");
+                SKIP_HERE();
+            }
+            task_compute_groups = static_cast<uint32_t>(d.groups[0]);
+            if (task_compute_groups > dev.props.limits.maxComputeWorkGroupCount[0]) {
+                logf("vk: task compute fallback skipped: %u parent groups exceed Vulkan X dispatch limit",
+                     task_compute_groups);
+                SKIP_HERE();
+            }
+            const uint64_t child_groups =
+                static_cast<uint64_t>(task_compute_groups) * p.task_compute_groups_per_task;
+            if (child_groups == 0 || child_groups > UINT32_MAX ||
+                child_groups > dev.props.limits.maxComputeWorkGroupCount[0]) {
+                logf("vk: task compute fallback skipped: %llu child groups exceed Vulkan X dispatch limit",
+                     static_cast<unsigned long long>(child_groups));
+                SKIP_HERE();
+            }
+            mesh_compute_group_x = static_cast<uint32_t>(child_groups);
+            mesh_compute_group_y = mesh_compute_group_z = 1;
+            mesh_compute_groups = mesh_compute_group_x;
+        } else {
+            mesh_compute_group_x = static_cast<uint32_t>(d.groups[0]);
+            mesh_compute_group_y = static_cast<uint32_t>(d.groups[1]);
+            mesh_compute_group_z = static_cast<uint32_t>(d.groups[2]);
+            const uint64_t xy_groups = static_cast<uint64_t>(mesh_compute_group_x) * mesh_compute_group_y;
+            if (xy_groups > UINT32_MAX / mesh_compute_group_z) {
+                logf("vk: compute mesh fallback skipped: 3D workgroup count exceeds 32-bit output indexing");
+                SKIP_HERE();
+            }
+            mesh_compute_groups = static_cast<uint32_t>(xy_groups * mesh_compute_group_z);
         }
-        mesh_compute_groups = static_cast<uint32_t>(xy_groups * mesh_compute_group_z);
         const bool multi_draw_indirect = dev.features.multiDrawIndirect == VK_TRUE;
         if (mesh_compute_group_x > dev.props.limits.maxComputeWorkGroupCount[0] ||
             mesh_compute_group_y > dev.props.limits.maxComputeWorkGroupCount[1] ||
@@ -4073,12 +4099,49 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
         mesh_compute_commands_buffer = cur->mesh_output.commands;
         mesh_compute_vertices_buffer = cur->mesh_output.vertices;
 
+        if (p.task_compute) {
+            const uint64_t words_per_task = static_cast<uint64_t>(p.task_compute_payload_words) + 1U;
+            if (words_per_task > UINT64_MAX / sizeof(uint32_t) ||
+                static_cast<uint64_t>(task_compute_groups) >
+                    UINT64_MAX / (words_per_task * sizeof(uint32_t))) {
+                logf("vk: task compute fallback skipped: payload output size overflow");
+                SKIP_HERE();
+            }
+            const uint64_t task_output_bytes =
+                static_cast<uint64_t>(task_compute_groups) * words_per_task * sizeof(uint32_t);
+            if (!task_output_bytes) {
+                logf("vk: task compute fallback skipped: empty payload output allocation");
+                SKIP_HERE();
+            }
+            if (!cur->task_output.payloads || cur->task_output.payloads_capacity < task_output_bytes) {
+                TaskOutputBuffers replacement{};
+                const VkBufferUsageFlags usage =
+                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+                if (!create_device_buffer(task_output_bytes, usage, replacement.payloads,
+                                          replacement.payloads_alloc)) {
+                    logf("vk: could not allocate %llu bytes for task payload records",
+                         static_cast<unsigned long long>(task_output_bytes));
+                    SKIP_HERE();
+                }
+                replacement.payloads_capacity = task_output_bytes;
+                if (cur->task_output.payloads)
+                    cur->retired_task_outputs.push_back(cur->task_output);
+                cur->task_output = replacement;
+            }
+            mesh_task_output_buffer = cur->task_output.payloads;
+        }
+
         VkBufferDeviceAddressInfo command_address_info{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
         command_address_info.buffer = mesh_compute_commands_buffer;
         mesh_compute_commands_address = vkGetBufferDeviceAddress(dev.device, &command_address_info);
         VkBufferDeviceAddressInfo vertex_address_info{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
         vertex_address_info.buffer = mesh_compute_vertices_buffer;
         mesh_compute_vertices_address = vkGetBufferDeviceAddress(dev.device, &vertex_address_info);
+        if (p.task_compute) {
+            VkBufferDeviceAddressInfo task_address_info{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
+            task_address_info.buffer = mesh_task_output_buffer;
+            mesh_task_output_address = vkGetBufferDeviceAddress(dev.device, &task_address_info);
+        }
         if (!mesh_args_ready()) {
             logf("vk: compute mesh fallback skipped: firstTask address buffer unavailable");
             SKIP_HERE();
@@ -4087,27 +4150,65 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
         if (d.first_task != 0) first_entry = mesh_args_take(1);
         mesh_args_words[first_entry * 4 + 3] = static_cast<uint32_t>(d.first_task);
         mesh_compute_first_address = mesh_args_address + static_cast<uint64_t>(first_entry) * 16U + 12U;
-        if (!mesh_compute_commands_address || !mesh_compute_vertices_address || !mesh_compute_first_address) {
+        if (!mesh_compute_commands_address || !mesh_compute_vertices_address || !mesh_compute_first_address ||
+            (p.task_compute && !mesh_task_output_address)) {
             logf("vk: compute mesh output buffers have no device address");
             SKIP_HERE();
         }
 
         {
-            ParLock mesh_pipeline_lock(!p.compute_pipeline);
-            if (!p.compute_pipeline) {
+            ParLock mesh_pipeline_lock(!p.mesh_compute_pipeline ||
+                                       (p.task_compute && !p.task_compute_pipeline));
+            if (p.task_compute && !p.task_compute_pipeline) {
+                const auto task_stage = std::find_if(p.stages.begin(), p.stages.end(),
+                    [](const Stage& st) {
+                        return st.nvn_stage == 6 && st.vk_stage == VK_SHADER_STAGE_COMPUTE_BIT;
+                    });
+                if (task_stage == p.stages.end() || !task_stage->module) {
+                    logf("vk: task compute pipeline for %016llx has no task compute module",
+                         static_cast<unsigned long long>(p.key));
+                    SKIP_HERE();
+                }
                 pcache_init();
                 VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
                 ci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
                 ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-                ci.stage.module = p.stages.front().module;
+                ci.stage.module = task_stage->module;
+                ci.stage.pName = "main";
+                pin_subgroup(ci.stage, p.task_workgroup[0]);
+                ci.layout = p.layout;
+                const VkResult made = guarded_compute(pcache, &ci, &p.task_compute_pipeline);
+                if (made != VK_SUCCESS || !p.task_compute_pipeline) {
+                    logf("vk: task compute pipeline for %016llx was not created (%d)",
+                         static_cast<unsigned long long>(p.key), static_cast<int>(made));
+                    p.task_compute_pipeline = VK_NULL_HANDLE;
+                    SKIP_HERE();
+                }
+                pcache_built_since_save++;
+            }
+            if (!p.mesh_compute_pipeline) {
+                const auto mesh_stage = std::find_if(p.stages.begin(), p.stages.end(),
+                    [](const Stage& st) {
+                        return st.nvn_stage == 7 && st.vk_stage == VK_SHADER_STAGE_COMPUTE_BIT;
+                    });
+                if (mesh_stage == p.stages.end() || !mesh_stage->module) {
+                    logf("vk: mesh compute pipeline for %016llx has no mesh compute module",
+                         static_cast<unsigned long long>(p.key));
+                    SKIP_HERE();
+                }
+                pcache_init();
+                VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+                ci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+                ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+                ci.stage.module = mesh_stage->module;
                 ci.stage.pName = "main";
                 pin_subgroup(ci.stage, p.workgroup[0]);
                 ci.layout = p.layout;
-                const VkResult made = guarded_compute(pcache, &ci, &p.compute_pipeline);
-                if (made != VK_SUCCESS || !p.compute_pipeline) {
-                    logf("vk: compute mesh pipeline for %016llx was not created (%d)",
+                const VkResult made = guarded_compute(pcache, &ci, &p.mesh_compute_pipeline);
+                if (made != VK_SUCCESS || !p.mesh_compute_pipeline) {
+                    logf("vk: mesh compute pipeline for %016llx was not created (%d)",
                          static_cast<unsigned long long>(p.key), static_cast<int>(made));
-                    p.compute_pipeline = VK_NULL_HANDLE;
+                    p.mesh_compute_pipeline = VK_NULL_HANDLE;
                     SKIP_HERE();
                 }
                 pcache_built_since_save++;
@@ -4115,13 +4216,24 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
         }
         end_pass(cmd);
         full_barrier(cmd);
-        // Undefined generic components must read as zero; clear the output before the
-        // mesh compute stage writes the components present in this program.
+        // Undefined generic components must read as zero; clear output before mesh compute writes present components.
         vkCmdFillBuffer(cmd, mesh_compute_vertices_buffer, 0, mesh_compute_vertex_bytes, 0);
         full_barrier(cmd);
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p.compute_pipeline);
+        if (p.task_compute) {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p.task_compute_pipeline);
+            if (!bind_descriptors(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p)) SKIP_HERE();
+            push_constants(cmd, p, nullptr, mesh_compute_commands_address,
+                           mesh_compute_vertices_address, mesh_compute_first_address,
+                           mesh_task_output_address);
+            vkCmdDispatch(cmd, task_compute_groups, 1, 1);
+            // Task output payload/count records must be visible to every mesh compute workgroup.
+            full_barrier(cmd);
+        }
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p.mesh_compute_pipeline);
         if (!bind_descriptors(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p)) SKIP_HERE();
-        push_constants(cmd, p, nullptr, mesh_compute_commands_address, mesh_compute_vertices_address, mesh_compute_first_address);
+        push_constants(cmd, p, nullptr, mesh_compute_commands_address,
+                       mesh_compute_vertices_address, mesh_compute_first_address,
+                       mesh_task_output_address);
         vkCmdDispatch(cmd, mesh_compute_group_x, mesh_compute_group_y, mesh_compute_group_z);
         work_since_barrier = true;
     }
