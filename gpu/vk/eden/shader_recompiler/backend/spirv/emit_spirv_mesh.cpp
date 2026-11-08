@@ -39,6 +39,17 @@ Id PayloadWord(EmitContext& ctx, Id index) {
                              Clamped(ctx, index, ctx.mesh_info.payload_words));
 }
 
+Id MeshTaskOutputWord(EmitContext& ctx, Id base, Id word_index) {
+    const Id block = ctx.OpConvertUToPtr(ctx.mesh_task_output_block_pointer, base);
+    return ctx.OpAccessChain(ctx.mesh_task_output_word_pointer, block, ctx.Const(0U), word_index);
+}
+
+Id MeshTaskOutputAddress(EmitContext& ctx) {
+    return ctx.OpLoad(ctx.U64,
+        ctx.OpAccessChain(ctx.mesh_task_output_push_u64, ctx.rescaling_push_constants,
+                          ctx.Const(ctx.mesh_task_output_member_index)));
+}
+
 Id SharedWord(EmitContext& ctx, Id array, Id index) {
     return ctx.OpAccessChain(ctx.mesh_shared_u32, array, index);
 }
@@ -116,11 +127,38 @@ u32 task_cap(u32 threads) {   // (RX_VK_TASK_CAP=<n>: mesh workgroups a task may
 
 void TaskEpilogue(EmitContext& ctx) {
     Barrier(ctx);
-    // (hookshot) at most one mesh workgroup a task thread: each thread keeps or culls one meshlet (the programs compact them by subgroup
-    // ballot). It was 65535, and a payload word a task left unwritten is anything: when the task culled everything, tens of thousands of
-    // mesh workgroups for a draw held the GPU past Windows' two seconds, and the device was lost, on about half the first starts
+    // Each task invocation keeps or culls meshlets and compacts their data in the
+    // task payload. Native Vulkan passes that payload directly to every child mesh
+    // workgroup. The compute fallback writes one bounded record per task workgroup:
+    // [emitted child count][payload words...]. The following mesh dispatch reads it.
+    const u32 max_children = ctx.runtime_info.task_compute_groups_per_task
+                                 ? ctx.runtime_info.task_compute_groups_per_task
+                                 : task_cap(ctx.mesh_threads);
     const Id count{ctx.OpUMin(ctx.U32[1], ctx.OpLoad(ctx.U32[1], PayloadWord(ctx, ctx.Const(1U))),
-                              ctx.Const(task_cap(ctx.mesh_threads)))};
+                              ctx.Const(max_children))};
+    if (ctx.runtime_info.task_compute_emulation) {
+        const Id workgroup{ctx.OpCompositeExtract(ctx.U32[1], ctx.OpLoad(ctx.U32[3], ctx.workgroup_id), 0U)};
+        const Id group64{ctx.OpUConvert(ctx.U64, workgroup)};
+        const Id stride64{ctx.Constant(ctx.U64, static_cast<u64>(ctx.mesh_info.payload_words) + 1U)};
+        const Id base{ctx.OpIMul(ctx.U64, group64, stride64)};
+        const Id output{MeshTaskOutputAddress(ctx)};
+        const Id invocation{LocalInvocation(ctx)};
+        If(ctx, ctx.OpIEqual(ctx.U1, invocation, ctx.u32_zero_value), [&] {
+            ctx.OpStore(MeshTaskOutputWord(ctx, output, base), count);
+        });
+        for (u32 first = 0; first < ctx.mesh_info.payload_words; first += ctx.mesh_threads) {
+            const Id word{ctx.OpIAdd(ctx.U32[1], invocation, ctx.Const(first))};
+            If(ctx, ctx.OpULessThan(ctx.U1, word, ctx.Const(ctx.mesh_info.payload_words)), [&] {
+                const Id value{ctx.OpLoad(ctx.U32[1], PayloadWord(ctx, word))};
+                const Id word64{ctx.OpUConvert(ctx.U64, word)};
+                const Id one64{ctx.Constant(ctx.U64, u64{1})};
+                const Id destination{ctx.OpIAdd(ctx.U64, base,
+                    ctx.OpIAdd(ctx.U64, one64, word64))};
+                ctx.OpStore(MeshTaskOutputWord(ctx, output, destination), value);
+            });
+        }
+        return;
+    }
     const Id one{ctx.Const(1U)};
     // Marker for OpEmitMeshTasksEXT count, 1, 1, payload (PatchMeshInstructions).
     ctx.OpStore(count, one);
@@ -188,10 +226,14 @@ Id EmitIsbeRead(EmitContext& ctx, Id address) {
         ctx.OpCompositeExtract(ctx.U32[1], ctx.OpLoad(ctx.U32[3], ctx.workgroup_id), 0U)};
     if (ctx.stage == Stage::Task) {
         if (ctx.wants_mesh_first && Sirit::ValidId(ctx.rescaling_push_constants)) {
-            // (hookshot) + the draw's first workgroup: NVN draws [first, first + count). Without it every draw began at 0: the
-            // foliage's draws (first up to ~1900) drew the first records again and again, and the forest had no leaves
             const Id table{ctx.OpLoad(ctx.U64, ctx.OpAccessChain(ctx.TypePointer(spv::StorageClass::PushConstant, ctx.U64),
                                                                   ctx.rescaling_push_constants, ctx.Const(ctx.mesh_first_member_index)))};
+            if (ctx.runtime_info.task_compute_emulation) {
+                const Id member{ctx.OpAccessChain(ctx.mesh_first_member_pointer,
+                    ctx.OpConvertUToPtr(ctx.mesh_first_block_pointer, table), ctx.Const(0U))};
+                const Id first{ctx.OpLoad(ctx.U32[1], member, spv::MemoryAccessMask::Aligned, 4U)};
+                return ctx.OpIAdd(ctx.U32[1], workgroup, first);
+            }
             const Id draw{ctx.OpLoad(ctx.U32[1], ctx.draw_index)};
             const Id at{ctx.OpIAdd(ctx.U64, table, ctx.OpUConvert(ctx.U64, ctx.OpIMul(ctx.U32[1], draw, ctx.Const(16U))))};
             const Id member{ctx.OpAccessChain(ctx.mesh_first_member_pointer, ctx.OpConvertUToPtr(ctx.mesh_first_block_pointer, at),
@@ -199,12 +241,12 @@ Id EmitIsbeRead(EmitContext& ctx, Id address) {
             const Id first{ctx.OpLoad(ctx.U32[1], member, spv::MemoryAccessMask::Aligned, 4U)};
             return ctx.OpIAdd(ctx.U32[1], workgroup, first);
         }
-        return workgroup; // the input region holds the workgroup index (VERTEX_ID)
+        return workgroup;
     }
     const Id index{ctx.OpShiftRightLogical(ctx.U32[1], address, ctx.Const(2U))};
     const Id word{ctx.OpLoad(ctx.U32[1], PayloadWord(ctx, index))};
-    Id shader_workgroup = workgroup;
-    if (ctx.runtime_info.mesh_compute_emulation && ctx.wants_mesh_first) {
+    Id shader_workgroup = ctx.runtime_info.mesh_task_input_emulation ? ctx.mesh_task_child_id : workgroup;
+    if (ctx.runtime_info.mesh_compute_emulation && !ctx.runtime_info.mesh_task_input_emulation && ctx.wants_mesh_first) {
         // The compute dispatch starts at local group zero, but NVN's
         // firstTask is part of the mesh shader's guest-visible WorkgroupId.
         // Keep this offset out of MeshComputeEpilogue's output-buffer index.
@@ -259,8 +301,33 @@ void EmitMeshPrologue(EmitContext& ctx) {
     if (ctx.stage != Stage::Mesh) {
         return;
     }
-    // The no-task compute fallback has no task stage to initialise the payload.
-    if (ctx.runtime_info.mesh_compute_emulation) {
+    if (ctx.runtime_info.mesh_task_input_emulation) {
+        // Workgroups were allocated as taskCount * maxChildren. Each group maps
+        // back to one parent task record and a child ordinal within that record.
+        const Id workgroup{ctx.OpCompositeExtract(ctx.U32[1], ctx.OpLoad(ctx.U32[3], ctx.workgroup_id), 0U)};
+        const Id cap{ctx.Const(ctx.runtime_info.task_compute_groups_per_task)};
+        ctx.mesh_task_child_id = ctx.OpUMod(ctx.U32[1], workgroup, cap);
+        const Id task_group{ctx.OpUDiv(ctx.U32[1], workgroup, cap)};
+        const Id task_group64{ctx.OpUConvert(ctx.U64, task_group)};
+        const Id stride64{ctx.Constant(ctx.U64, static_cast<u64>(ctx.mesh_info.payload_words) + 1U)};
+        const Id base{ctx.OpIMul(ctx.U64, task_group64, stride64)};
+        const Id output{MeshTaskOutputAddress(ctx)};
+        const Id emitted{ctx.OpLoad(ctx.U32[1], MeshTaskOutputWord(ctx, output, base))};
+        ctx.mesh_task_child_valid = ctx.OpULessThan(ctx.U1, ctx.mesh_task_child_id, emitted);
+        const Id invocation{LocalInvocation(ctx)};
+        const Id one64{ctx.Constant(ctx.U64, u64{1})};
+        for (u32 first = 0; first < ctx.mesh_info.payload_words; first += ctx.mesh_threads) {
+            const Id word{ctx.OpIAdd(ctx.U32[1], invocation, ctx.Const(first))};
+            If(ctx, ctx.OpULessThan(ctx.U1, word, ctx.Const(ctx.mesh_info.payload_words)), [&] {
+                const Id word64{ctx.OpUConvert(ctx.U64, word)};
+                const Id source{ctx.OpIAdd(ctx.U64, base, ctx.OpIAdd(ctx.U64, one64, word64))};
+                const Id value{ctx.OpLoad(ctx.U32[1], MeshTaskOutputWord(ctx, output, source))};
+                ctx.OpStore(PayloadWord(ctx, word), value);
+            });
+        }
+        Barrier(ctx);
+    } else if (ctx.runtime_info.mesh_compute_emulation) {
+        // The no-task compute fallback has no task stage to initialise the payload.
         const Id invocation{LocalInvocation(ctx)};
         for (u32 first = 0; first < ctx.mesh_info.payload_words; first += ctx.mesh_threads) {
             const Id word{ctx.OpIAdd(ctx.U32[1], invocation, ctx.Const(first))};
@@ -297,8 +364,11 @@ Id MeshMapVertex(EmitContext& ctx, Id primitive, u32 corner, u32 corners) {
 void MeshComputeEpilogue(EmitContext& ctx) {
     const MeshInfo& mesh = ctx.mesh_info;
     Barrier(ctx);
-    const Id count = ctx.OpUMin(ctx.U32[1], ctx.OpLoad(ctx.U32[1], ctx.mesh_primitive_count),
-                                ctx.Const(mesh.max_primitives));
+    const Id raw_count = ctx.OpUMin(ctx.U32[1], ctx.OpLoad(ctx.U32[1], ctx.mesh_primitive_count),
+                                    ctx.Const(mesh.max_primitives));
+    const Id count = ctx.runtime_info.mesh_task_input_emulation
+                         ? ctx.OpSelect(ctx.U32[1], ctx.mesh_task_child_valid, raw_count, ctx.u32_zero_value)
+                         : raw_count;
     // Keep the shader-visible WorkgroupId three-dimensional, but flatten it for the
     // fallback's contiguous vertex and indirect-command output arrays.
     const Id workgroup = ctx.OpLoad(ctx.U32[3], ctx.workgroup_id);
