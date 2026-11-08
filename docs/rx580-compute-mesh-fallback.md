@@ -1,6 +1,6 @@
 # RX 580 compatibility: no-task mesh shaders via compute + indirect draws
 
-Status: **partial research-branch implementation; compile validation is pending for the 3D-dispatch expansion, and RX 580 runtime validation has not happened.** The current code translates eligible direct mesh draws with no task stage into compute dispatches plus generated vertex data and conventional indirect draws. Direct 1D, 2D and 3D workgroup grids are supported by the fallback; task-stage and indirect mesh dispatches are not. This is not a complete task/mesh-shader replacement.
+Status: **partial research-branch implementation; the Windows renderer compile and RX 580 runtime validation are still pending.** The current code translates eligible direct mesh draws with no task stage into compute dispatches plus generated vertex data and conventional indirect draws. The compute emitter can flatten 1D/2D/3D workgroup grids, but the current NVN replay path maps the verified direct `DrawMeshTasks(first, count)` form to X only and fixes Y/Z to one. Task-stage and indirect mesh dispatches are not supported. This is not a complete task/mesh-shader replacement.
 
 This note records the RX 580 failure mode and the fallback design. A capability check or environment-variable change cannot make native mesh shaders available on hardware that does not expose `VK_EXT_mesh_shader`.
 
@@ -44,13 +44,13 @@ The current code does not translate task stages. `mesh_program_locked()` rejects
 
 The branch translates eligible no-task mesh stages to SPIR-V compute and writes vertex and indirect-command records through device addresses. Supported output is limited to line-list and triangle-list topology, position X/Y/Z, and generic varyings. Per-primitive generic values are duplicated to each generated corner and marked flat on the fragment inputs.
 
-The compute emitter is prepared to flatten three-dimensional workgroup IDs into a unique output slot, but the current NVN replay maps the verified direct `DrawMeshTasks(first, count)` form to X only and fixes Y/Z to one. The raw third register in the captured record has not been confirmed as a group-count argument, so the current game-facing fallback remains 1D. The output packet index is flattened as:
+The compute emitter is prepared to flatten three-dimensional workgroup IDs into a unique output slot, but the current NVN replay maps the verified direct `DrawMeshTasks(first, count)` form to X only and fixes Y/Z to one. The raw third register in the captured record has not been confirmed as a group-count argument, so the current game-facing fallback remains 1D. For that direct no-task path, the compute shader adds the recorded `firstTask` to the guest-visible X workgroup ID, while the output epilogue keeps the local workgroup ID so its generated-vertex writes stay within the per-draw allocation. The output packet index is flattened as:
 
 ```
 x + dispatch_x * (y + dispatch_y * z) (with Y/Z currently 0 because the replay dispatches one-dimensional grids)
 ```
 
-The shader-visible workgroup IDs are not flattened or rewritten, so shaders that read X/Y/Z continue to see the original grid coordinates. Indirect mesh dispatches, task payloads and unsupported output built-ins remain unsupported. Hardware/runtime validation is still outstanding.
+The output packet index is not the shader-visible workgroup ID: X remains `firstTask + local WorkgroupId.x`, while the local Y/Z components are preserved for a dispatch grid that supplies them. Indirect mesh dispatches, task payloads, task-stage first-workgroup offsets and unsupported output built-ins remain unsupported. Hardware/runtime validation is still outstanding.
 
 ### 3. Conventional indirect draws
 
@@ -61,8 +61,8 @@ The compute stage expands each output primitive to a line-list or triangle-list 
 - The current draw path ends the render pass and inserts full barriers around the output clear and compute dispatch before consuming generated vertices and indirect commands. The barrier scopes still need validation on the target AMD driver.
 - Output buffers are owned by the active recording; replaced buffers are retired and released when that recording slot is reused after completion. The growth path must continue to be checked for allocation failures and large draws.
 - The draw path checks 32-bit output indexing, dispatch-axis limits, indirect-draw count limits and allocation failures; unsupported or oversized draws are logged and skipped.
-- Remaining semantic gaps include task culling/payload, indirect mesh dispatches, viewport/layer outputs, primitive IDs, point size, clip/cull outputs and first-workgroup semantics where a task stage supplies them.
-- Validate with scenes that exercise direct multidimensional no-task grids, task culling, large foliage/grass batches, multi-primitive meshlets and zero-output workgroups.
+- Remaining semantic gaps include task culling/payload, task-stage first-workgroup offsets, indirect mesh dispatches, viewport/layer outputs, primitive IDs, point size and clip/cull outputs.
+- Validate with scenes that exercise direct no-task draws with nonzero firstTask, task culling, large foliage/grass batches, multi-primitive meshlets and zero-output workgroups.
 
 ## Source areas that need coordinated changes
 
