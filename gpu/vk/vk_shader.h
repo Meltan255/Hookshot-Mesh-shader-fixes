@@ -54,6 +54,7 @@ struct Program {
     bool task_compute = false;      // task stage translated to compute, with payload records for mesh compute
     uint32_t task_compute_groups_per_task = 0;
     uint32_t task_compute_payload_words = 0;
+    uint32_t mesh_compute_payload_words = 0;
     uint32_t mesh_compute_max_primitives = 0;
     uint32_t mesh_compute_corners = 3;
     std::bitset<32> mesh_compute_generics{};
