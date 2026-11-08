@@ -623,7 +623,7 @@ void EmitContext::DefineCommonTypes(const Info& info) {
         U16 = Name(TypeInt(16, false), "u16");
         S16 = Name(TypeInt(16, true), "s16");
     }
-    if (info.uses_int64 && profile.support_int64) {
+    if ((info.uses_int64 || runtime_info.mesh_compute_emulation || runtime_info.task_compute_emulation) && profile.support_int64) {
         AddCapability(spv::Capability::Int64);
         U64 = Name(TypeInt(64, false), "u64");
     }
@@ -1783,7 +1783,7 @@ void EmitContext::DefineInputs(const IR::Program& program) {
     if (info.uses_workgroup_id || mesh_compute_emulation || task_compute_emulation) {
         workgroup_id = DefineInput(*this, U32[3], false, spv::BuiltIn::WorkgroupId);
     }
-    if (mesh_compute_emulation) {
+    if (mesh_compute_emulation || task_compute_emulation) {
         num_workgroups = DefineInput(*this, U32[3], false, spv::BuiltIn::NumWorkgroups);
     }
     if (info.uses_local_invocation_id || mesh_compute_emulation || task_compute_emulation) {
