@@ -156,7 +156,7 @@ jobs:
           Only direct one-dimensional task/mesh dispatches are accepted; indirect task/mesh
           dispatches, multidimensional task grids and unsupported mesh output built-ins are
           skipped. Task or mesh shaders with external memory, storage-buffer, image or atomic
-          side effects are rejected because the bounded fan-out can execute culled child slots.
+          side effects are rejected because the bounded fan-out can execute culled child slots; task-stage writes remain allowed because each task runs once.
           Shader code still runs for those empty slots, so this is not identical to native
           variable-size dispatch. Some geometry or effects may remain missing. A successful
           Windows compile does not prove correct rendering; actual RX 580 testing is required.
