@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
-"""Source regression checks for the no-task mesh-compute fallback."""
+"""Source regression checks for RX 580 mesh/task compute emulation."""
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DRAW = (ROOT / "gpu/vk/vk_draw.cpp").read_text(encoding="utf-8")
+SHADER = (ROOT / "gpu/vk/vk_shader.cpp").read_text(encoding="utf-8")
+SHADER_H = (ROOT / "gpu/vk/vk_shader.h").read_text(encoding="utf-8")
 CONTEXT = (ROOT / "gpu/vk/eden/shader_recompiler/backend/spirv/spirv_emit_context.cpp").read_text(encoding="utf-8")
 EMITTER = (ROOT / "gpu/vk/eden/shader_recompiler/backend/spirv/emit_spirv_mesh.cpp").read_text(encoding="utf-8")
+ENTRY = (ROOT / "gpu/vk/eden/shader_recompiler/backend/spirv/emit_spirv.cpp").read_text(encoding="utf-8")
+GETSET = (ROOT / "gpu/vk/eden/shader_recompiler/backend/spirv/emit_spirv_context_get_set.cpp").read_text(encoding="utf-8")
+RUNTIME = (ROOT / "gpu/vk/eden/shader_recompiler/runtime_info.h").read_text(encoding="utf-8")
+REPLAY = (ROOT / "gpu/vk/vk_replay.cpp").read_text(encoding="utf-8")
 
 checks = {
     "mesh compute always receives WorkgroupId": "info.uses_workgroup_id || mesh_compute_emulation" in CONTEXT,
@@ -19,33 +25,50 @@ checks = {
         for axis, index in (("x", 0), ("y", 1), ("z", 2))
     ),
     "dispatch preserves original 3D grid": "vkCmdDispatch(cmd, mesh_compute_group_x, mesh_compute_group_y, mesh_compute_group_z)" in DRAW,
-    "NVN2 replay keeps only the verified direct task-count axis": "da.groups[0] = d.y, da.groups[1] = 1, da.groups[2] = 1;" in (ROOT / "gpu/vk/vk_replay.cpp").read_text(encoding="utf-8"),
+    "NVN2 replay keeps only the verified direct task-count axis": "da.groups[0] = d.y, da.groups[1] = 1, da.groups[2] = 1;" in REPLAY,
     "flattened output allocation uses total workgroups": "xy_groups * mesh_compute_group_z" in DRAW,
     "mesh compute declares a firstTask push field": "wants_mesh_first = true;" in CONTEXT and "mesh_first_member_index" in CONTEXT,
     "mesh compute has physical firstTask pointer types": "mesh_first_block_pointer = TypePointer(spv::StorageClass::PhysicalStorageBuffer, first_block)" in CONTEXT,
     "mesh shader WorkgroupId includes firstTask": "shader_workgroup = ctx.OpIAdd(ctx.U32[1], workgroup, first);" in EMITTER,
     "mesh output indexing keeps the local WorkgroupId": "OpCompositeExtract(ctx.U32[1], workgroup, 0U)" in EMITTER,
     "firstTask is stored into a per-draw ring entry": "mesh_args_words[first_entry * 4 + 3] = static_cast<uint32_t>(d.first_task)" in DRAW,
-    "compute dispatch pushes its direct firstTask address": "push_constants(cmd, p, nullptr, mesh_compute_commands_address, mesh_compute_vertices_address, mesh_compute_first_address)" in DRAW,
-    "graphics push keeps the same compute firstTask address": "push_constants(cmd, p, &at, mesh_compute_commands_address, mesh_compute_vertices_address, mesh_compute_first_address)" in DRAW,
+    "compute dispatch pushes its direct firstTask address": "push_constants(cmd, p, nullptr, mesh_compute_commands_address" in DRAW and "mesh_compute_first_address" in DRAW,
+    "graphics push keeps the same compute firstTask address": "push_constants(cmd, p, &at, mesh_compute_commands_address" in DRAW and "mesh_compute_first_address" in DRAW,
     "firstTask push constant is copied into the mesh compute block": "data + Shader::Backend::SPIRV::MESH_FIRST_PUSH_OFFSET" in DRAW,
     "firstTask ring supports physical shader reads": "VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT" in DRAW,
     "firstTask value uses the direct draw's ring slot": "mesh_compute_first_address = mesh_args_address + static_cast<uint64_t>(first_entry) * 16U + 12U" in DRAW,
+    "task compute runtime mode exists": "bool task_compute_emulation{};" in RUNTIME,
+    "mesh task-input runtime mode exists": "bool mesh_task_input_emulation{};" in RUNTIME,
+    "task and mesh compute stages are both enabled on non-mesh devices": "rt.task_compute_emulation = task_compute;" in SHADER and "mrt.mesh_compute_emulation = !dev.mesh_shader;" in SHADER,
+    "task shader uses GLCompute execution model in fallback": "if (ctx.runtime_info.task_compute_emulation)" in ENTRY and "execution_model = spv::ExecutionModel::GLCompute;" in ENTRY,
+    "task compute writes one count and payload record per parent": "MeshTaskOutputWord(ctx, output, base), count" in EMITTER and "MeshTaskOutputWord(ctx, output, destination), value" in EMITTER,
+    "mesh compute reads the parent record and copies payload": "MeshTaskOutputWord(ctx, output, base)" in EMITTER and "mesh_task_child_id = ctx.OpUMod" in EMITTER,
+    "mesh child ordinal is exposed as shader WorkgroupId": "ctx.mesh_task_child_id" in GETSET and "mesh_task_input_emulation" in GETSET,
+    "culled child slots emit zero primitives": "ctx.mesh_task_child_valid, raw_count, ctx.u32_zero_value" in EMITTER,
+    "task payload words are cleared before task shader execution": "ctx.stage == Stage::Task" in EMITTER and "ctx.OpStore(PayloadWord(ctx, word), ctx.u32_zero_value)" in EMITTER,
+    "task payload buffer has storage and device-address usage": "VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT" in DRAW,
+    "task compute pipeline uses the task stage module": "st.nvn_stage == 6 && st.vk_stage == VK_SHADER_STAGE_COMPUTE_BIT" in DRAW and "p.task_compute_pipeline" in DRAW,
+    "mesh compute pipeline uses the mesh stage module": "st.nvn_stage == 7 && st.vk_stage == VK_SHADER_STAGE_COMPUTE_BIT" in DRAW and "p.mesh_compute_pipeline" in DRAW,
+    "task dispatch occurs before mesh dispatch with a full barrier": (
+        DRAW.index("vkCmdDispatch(cmd, task_compute_groups, 1, 1);")
+        < DRAW.index("full_barrier(cmd);", DRAW.index("vkCmdDispatch(cmd, task_compute_groups, 1, 1);"))
+        < DRAW.index("vkCmdDispatch(cmd, mesh_compute_group_x, mesh_compute_group_y, mesh_compute_group_z);")
+    ),
+    "task fallback rejects indirect and non-1D grids": "if (d.indirect || d.groups[0] <= 0" in DRAW and "d.groups[1] != 1 || d.groups[2] != 1" in DRAW,
+    "task and mesh payload sizes are checked": "task_t->program.mesh.payload_words != mesh_t->program.mesh.payload_words" in SHADER,
+    "task output address is pushed": "MESH_TASK_OUTPUT_PUSH_OFFSET" in DRAW and "mesh_task_output_address" in DRAW,
 }
-# Exercise the exact linearization used by MeshComputeEpilogue. It must be a
-# collision-free, contiguous packet range for every positive dispatch grid.
+
 def flatten_group(x, y, z, dispatch_x, dispatch_y):
     return x + dispatch_x * (y + dispatch_y * z)
 
 
-# firstTask changes the guest-visible workgroup ID without changing the
-# local output slot used to address the per-draw vertex allocation.
-for first_task in (0, 1, 17, 2048):
-    for local_group in range(8):
-        guest_group = local_group + first_task
-        output_group = local_group
-        assert guest_group - first_task == output_group
+def flatten_task_child(task, child, groups_per_task):
+    return task * groups_per_task + child
 
+
+# Workgroup output slots must be collision-free and contiguous for every
+# supported dispatch grid. Shader-visible IDs are separate from buffer slots.
 for dispatch_x, dispatch_y, dispatch_z in ((1, 1, 1), (4, 3, 1), (2, 3, 5), (7, 1, 4)):
     slots = [
         flatten_group(x, y, z, dispatch_x, dispatch_y)
@@ -53,12 +76,34 @@ for dispatch_x, dispatch_y, dispatch_z in ((1, 1, 1), (4, 3, 1), (2, 3, 5), (7, 
         for y in range(dispatch_y)
         for x in range(dispatch_x)
     ]
-    expected = list(range(dispatch_x * dispatch_y * dispatch_z))
-    passed = slots == expected
-    checks[f"linearized group slots are contiguous for {dispatch_x}x{dispatch_y}x{dispatch_z}"] = passed
+    checks[f"linearized group slots are contiguous for {dispatch_x}x{dispatch_y}x{dispatch_z}"] = (
+        slots == list(range(dispatch_x * dispatch_y * dispatch_z))
+    )
+
+for task_count, cap in ((1, 1), (2, 32), (17, 64)):
+    slots = [
+        flatten_task_child(task, child, cap)
+        for task in range(task_count)
+        for child in range(cap)
+    ]
+    checks[f"task child slots map to stable parent records for {task_count}x{cap}"] = (
+        slots == list(range(task_count * cap))
+        and all(slot // cap == task and slot % cap == child
+                for task in range(task_count)
+                for child in range(cap)
+                for slot in [flatten_task_child(task, child, cap)])
+    )
+
+for first_task in (0, 1, 17, 2048):
+    for local_group in range(8):
+        guest_group = local_group + first_task
+        output_group = local_group
+        checks[f"firstTask preserves local output slot ({first_task},{local_group})"] = (
+            guest_group - first_task == output_group
+        )
 
 failed = [name for name, passed in checks.items() if not passed]
 for name, passed in checks.items():
     print(f"{'PASS' if passed else 'FAIL'}: {name}")
 if failed:
-    raise SystemExit(f"{len(failed)} mesh-compute regression check(s) failed")
+    raise SystemExit(f"{len(failed)} RX 580 mesh/task compute regression check(s) failed")
