@@ -1350,11 +1350,6 @@ void translate_mesh_into(Program& p, const NvnState& s, const Code* task, const 
             env.set_mesh(mesh_regs, nullptr);
             task_t = translate(env, true, true);
             dump_ir(p, "task", task_t->program, task->key);
-            if (!dev.mesh_shader &&
-                mesh_compute_has_unsupported_side_effects(task_t->program)) {
-                throw Shader::NotImplementedException(
-                    "task compute fallback: task stage contains non-workgroup external side effects");
-            }
             Shader::RuntimeInfo rt{};
             rt.previous_stage_stores.mask.set();
             const bool task_compute = !dev.mesh_shader;
