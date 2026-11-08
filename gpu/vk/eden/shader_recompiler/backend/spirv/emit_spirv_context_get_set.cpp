@@ -554,6 +554,10 @@ void EmitSetOFlag(EmitContext&) {
 }
 
 Id EmitWorkgroupId(EmitContext& ctx) {
+    if (ctx.runtime_info.mesh_task_input_emulation) {
+        return ctx.OpCompositeConstruct(ctx.U32[3], ctx.mesh_task_child_id,
+                                        ctx.u32_zero_value, ctx.u32_zero_value);
+    }
     return ctx.OpLoad(ctx.U32[3], ctx.workgroup_id);
 }
 
