@@ -44,10 +44,10 @@ The current code does not translate task stages. `mesh_program_locked()` rejects
 
 The branch translates eligible no-task mesh stages to SPIR-V compute and writes vertex and indirect-command records through device addresses. Supported output is limited to line-list and triangle-list topology, position X/Y/Z, and generic varyings. Per-primitive generic values are duplicated to each generated corner and marked flat on the fragment inputs.
 
-Direct 1D and 2D workgroup grids are dispatched with the original X/Y `WorkgroupId` coordinates (the current NVN2 direct command record has two group-count axes; Z is fixed at one). The compute emitter keeps a general three-axis output flattening formula, but this command path currently reaches it with Z = 1. The output packet index is flattened as:
+The compute emitter is prepared to flatten three-dimensional workgroup IDs into a unique output slot, but the current NVN replay maps the verified direct `DrawMeshTasks(first, count)` form to X only and fixes Y/Z to one. The raw third register in the captured record has not been confirmed as a group-count argument, so the current game-facing fallback remains 1D. The output packet index is flattened as:
 
 ```
-x + dispatch_x * (y + dispatch_y * z) (with z = 0 for the current 2D command path)
+x + dispatch_x * (y + dispatch_y * z) (with Y/Z currently 0 because the replay dispatches one-dimensional grids)
 ```
 
 The shader-visible workgroup IDs are not flattened or rewritten, so shaders that read X/Y/Z continue to see the original grid coordinates. Indirect mesh dispatches, task payloads and unsupported output built-ins remain unsupported. Hardware/runtime validation is still outstanding.

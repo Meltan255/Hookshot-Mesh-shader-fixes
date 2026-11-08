@@ -196,7 +196,7 @@ jobs:
 
             This release contains the Builder application and its full tools folder. It does not contain a game, game dump, keys, generated game executable or saves.
 
-            This experimental build keeps Vulkan active when VK_EXT_mesh_shader is unavailable and attempts compute-to-vertex emulation for direct 1D and 2D mesh workgroup grids with no task stage. Mesh draws with task stages, indirect draws and unsupported built-ins remain unsupported. RX_VK_FALLBACK_NO_MESH must be left unset; setting it bypasses Vulkan and hands off to WebGPU. RX 580 hardware testing is still required.
+            This experimental build keeps Vulkan active when VK_EXT_mesh_shader is unavailable and attempts compute-to-vertex emulation for direct one-dimensional mesh workgroup grids with no task stage. Mesh draws with task stages, indirect draws and unsupported built-ins remain unsupported. RX_VK_FALLBACK_NO_MESH must be left unset; setting it bypasses Vulkan and hands off to WebGPU. RX 580 hardware testing is still required.
           prerelease: true
           draft: false
           make_latest: false

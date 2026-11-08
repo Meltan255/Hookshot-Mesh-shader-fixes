@@ -19,7 +19,7 @@ The Windows workflow downloads the current full Builder tools bundle, overlays t
 
 ## What this build attempts
 
-When Vulkan lacks `VK_EXT_mesh_shader`, eligible mesh programs that have **no task stage** are translated to compute. Direct 1D and 2D workgroup grids are dispatched (the current command record supplies X/Y counts and fixes Z at 1), generated vertices and indirect draw commands are written, and a conventional vertex/fragment pipeline renders the result.
+When Vulkan lacks `VK_EXT_mesh_shader`, eligible mesh programs that have **no task stage** are translated to compute. Direct one-dimensional workgroup grids are dispatched, generated vertices and indirect draw commands are written, and a conventional vertex/fragment pipeline renders the result.
 
 ## Important limitations
 

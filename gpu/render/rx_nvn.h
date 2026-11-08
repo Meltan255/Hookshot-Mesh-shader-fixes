@@ -200,7 +200,7 @@ typedef struct { int32_t enable, index; } nvn_p_restart;
    value at count_addr says when there is one; read at replay, after the GPU's writes there reached guest memory */
 typedef struct { int32_t indexed, prim, itype, max, stride, pad; uint64_t ibuf, indirect, count_addr; } nvn_p_draw_indirect;
 typedef struct { uint64_t addr; } nvn_p_dispatch_indirect;   /* three 32-bit group counts */
-/* DrawMeshTasks (first task, X group count, Y group count), DrawMeshTasksIndirect (indirect, max 1),
+/* DrawMeshTasks (x, y, z: the call's arguments as they are), DrawMeshTasksIndirect (indirect, max 1),
    MultiDrawMeshTasksIndirectCount (indirect, count_addr, max, stride) */
 typedef struct { int32_t x, y, z, max, stride, kind; uint64_t indirect, count_addr; } nvn_p_draw_mesh;
 
