@@ -22,6 +22,23 @@ checks = {
     "NVN2 replay keeps only the verified direct task-count axis": "da.groups[0] = d.y, da.groups[1] = 1, da.groups[2] = 1;" in (ROOT / "gpu/vk/vk_replay.cpp").read_text(encoding="utf-8"),
     "flattened output allocation uses total workgroups": "xy_groups * mesh_compute_group_z" in DRAW,
 }
+# Exercise the exact linearization used by MeshComputeEpilogue. It must be a
+# collision-free, contiguous packet range for every positive dispatch grid.
+def flatten_group(x, y, z, dispatch_x, dispatch_y):
+    return x + dispatch_x * (y + dispatch_y * z)
+
+
+for dispatch_x, dispatch_y, dispatch_z in ((1, 1, 1), (4, 3, 1), (2, 3, 5), (7, 1, 4)):
+    slots = [
+        flatten_group(x, y, z, dispatch_x, dispatch_y)
+        for z in range(dispatch_z)
+        for y in range(dispatch_y)
+        for x in range(dispatch_x)
+    ]
+    expected = list(range(dispatch_x * dispatch_y * dispatch_z))
+    passed = slots == expected
+    checks[f"linearized group slots are contiguous for {dispatch_x}x{dispatch_y}x{dispatch_z}"] = passed
+
 failed = [name for name, passed in checks.items() if not passed]
 for name, passed in checks.items():
     print(f"{'PASS' if passed else 'FAIL'}: {name}")
