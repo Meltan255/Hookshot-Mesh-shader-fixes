@@ -14,6 +14,8 @@
 #include <chrono>
 #include <stdexcept>
 #include <cstdio>
+#include <cstdlib>
+#include <limits>
 #include <functional>
 #include <cstring>
 #include <memory>
@@ -1248,6 +1250,16 @@ std::vector<uint32_t> emit_mesh_compute_vertex_shader(const std::bitset<32>& gen
     return module.Assemble();
 }
 
+uint32_t task_compute_groups_per_task(uint32_t task_threads) {
+    if (task_threads == 0) return 1;
+    const char* value = std::getenv("RX_VK_TASK_CAP");
+    if (!value || !*value) return task_threads;
+    char* end = nullptr;
+    const unsigned long long parsed = std::strtoull(value, &end, 10);
+    if (end == value || *end != '\\0' || parsed == 0) return task_threads;
+    return static_cast<uint32_t>(std::min<unsigned long long>(parsed, std::numeric_limits<uint32_t>::max()));
+}
+
 void translate_mesh_into(Program& p, const NvnState& s, const Code* task, const Code& mesh, const Code* prim,
                          const Code* fsc, const uint8_t color_types[8]) {
     const auto t0 = std::chrono::steady_clock::now();
@@ -1271,15 +1283,29 @@ void translate_mesh_into(Program& p, const NvnState& s, const Code* task, const 
             dump_ir(p, "task", task_t->program, task->key);
             Shader::RuntimeInfo rt{};
             rt.previous_stage_stores.mask.set();
+            const bool task_compute = !dev.mesh_shader;
+            const uint32_t task_groups_per_task = task_compute
+                ? task_compute_groups_per_task(task_t->program.workgroup_size[0]) : 0U;
+            rt.task_compute_emulation = task_compute;
+            rt.task_compute_groups_per_task = task_groups_per_task;
             const std::vector<uint32_t> spirv = Shader::Backend::SPIRV::EmitSPIRV(profile(), rt, task_t->program, bindings);
             kept.push_back(spirv);
             Stage st;
             st.nvn_stage = bank_stage(*task);
             st.info = task_t->program.info;
             st.module = make_module(spirv);
-            st.vk_stage = VK_SHADER_STAGE_TASK_BIT_EXT;
+            st.vk_stage = task_compute ? VK_SHADER_STAGE_COMPUTE_BIT : VK_SHADER_STAGE_TASK_BIT_EXT;
             st.c1 = task->c1;
             p.stages.push_back(std::move(st));
+            if (task_compute) {
+                if (task_t->program.mesh.payload_words < 2 || task_groups_per_task == 0) {
+                    throw Shader::NotImplementedException("task compute fallback: invalid task payload layout or child-group cap");
+                }
+                p.task_compute = true;
+                p.task_workgroup = {task_t->program.workgroup_size[0], 1U, 1U};
+                p.task_compute_groups_per_task = task_groups_per_task;
+                p.task_compute_payload_words = task_t->program.mesh.payload_words;
+            }
         }
         Env menv{s, mesh, Shader::Stage::Mesh};
         menv.set_mesh(mesh_regs, prim ? prim->sph : nullptr);
@@ -1303,7 +1329,13 @@ void translate_mesh_into(Program& p, const NvnState& s, const Code* task, const 
         if (task_t) mrt.previous_stage_stores = task_t->program.info.stores;
         else mrt.previous_stage_stores.mask.set();
         mrt.convert_depth_mode = host->depth_minus_w() != 0;
-        mrt.mesh_compute_emulation = !dev.mesh_shader && task == nullptr;
+        mrt.mesh_compute_emulation = !dev.mesh_shader;
+        mrt.mesh_task_input_emulation = !dev.mesh_shader && task_t != nullptr;
+        mrt.task_compute_groups_per_task = task_t ? p.task_compute_groups_per_task : 0U;
+        if (mrt.mesh_task_input_emulation &&
+            task_t->program.mesh.payload_words != mesh_t->program.mesh.payload_words) {
+            throw Shader::NotImplementedException("task compute fallback: task and mesh payload sizes differ");
+        }
         const std::vector<uint32_t> mspirv = Shader::Backend::SPIRV::EmitSPIRV(profile(), mrt, mesh_t->program, bindings);
         kept.push_back(mspirv);
         Stage ms;
@@ -1359,8 +1391,9 @@ void translate_mesh_into(Program& p, const NvnState& s, const Code* task, const 
             p.mesh = false;
             static std::atomic<int> compute_mesh_logged{0};
             if (compute_mesh_logged++ < 12) {
-                logf("vk: mesh %016llx using no-task compute fallback: %u primitives/workgroup, %u corners, %zu generic outputs",
-                     (unsigned long long)p.key, mi.max_primitives, p.mesh_compute_corners, p.mesh_compute_generics.count());
+                logf("vk: mesh %016llx using compute mesh fallback%s: %u primitives/workgroup, %u corners, %zu generic outputs",
+                     (unsigned long long)p.key, p.task_compute ? " with GPU task payload" : "",
+                     mi.max_primitives, p.mesh_compute_corners, p.mesh_compute_generics.count());
             }
         }
         if (fsc) {
@@ -1427,11 +1460,6 @@ const Program* mesh_program_locked(const NvnState& s, const uint8_t color_types[
     static int logged;
     if (logged++ < 6) log_program_stages(s, "mesh draw");
     if (!mesh) return nullptr;
-    if (!dev.mesh_shader && task) {
-        static std::atomic<int> task_fallback_logged{0};
-        if (task_fallback_logged++ < 12) logf("vk: mesh draw has a task stage; compute fallback currently supports no-task mesh draws only");
-        return nullptr;
-    }
     const uint64_t key = mesh_key(task, *mesh, fsc, prim, color_types);
     auto& variants = programs[key];
     program_cache_load(key, variants);
